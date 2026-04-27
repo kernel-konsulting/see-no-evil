@@ -23,12 +23,9 @@ RUN apk add --no-cache curl ca-certificates \
 # -----------------------------------------------------------------------------
 FROM ghcr.io/0xerr0r/blocky:v0.24 AS runtime
 
-USER root
 COPY --from=downloader /lists/ /data/lists/
 COPY services/dns/blocky.yaml /etc/blocky/blocky.yaml
-COPY services/dns/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-USER 100
+COPY --chmod=0755 services/dns/entrypoint.sh /entrypoint.sh
 
 EXPOSE 53/udp 53/tcp
 # REST API (for flushing cache, query API)
