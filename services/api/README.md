@@ -43,11 +43,54 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   queue to avoid noise).
 - `POST /v1/quarantine/{id}/allow` and `/deny` resolve items.
 
+**M6 additions:**
+
+- Panic-relax mode persisted in `settings["panic_relax"]`. When active the
+  decide engine short-circuits to `allow` with reason `panic_relax`. State
+  changes write an `AuditDecision` row.
+  - `GET    /v1/admin/panic` — current state
+  - `POST   /v1/admin/panic` — `{duration_minutes, reason}` (admin)
+  - `DELETE /v1/admin/panic` — disable now (admin)
+- Quota heartbeat — proxy/agents POST minutes of active use; the row in
+  `quotas` is upserted for today and read by the decide engine.
+  - `POST   /v1/quota/heartbeat` — `{device_mac|device_id, minutes}`
+  - `GET    /v1/quota/{device_id}` — admin view
+  - `DELETE /v1/quota/{device_id}` — admin reset
+- Outbound notifications (best-effort, BackgroundTask) for block events on
+  profiles with `notify_on_block = true`, plus panic enable/disable. Configured
+  under `notifications:` in `config.yaml` (`ntfy_url`, `webhook_url`,
+  `webhook_token`). When unset, no HTTP is performed.
+
+**M7 additions:**
+
+- `Device` table gained `ip` and `vendor` columns (migration `0004_device_enrichment`).
+  `POST /v1/devices/discover` now stores both. IP is refreshed on every scan
+  (DHCP leases change); vendor is preserved once set so admin edits aren't
+  clobbered. The Devices page in the UI renders both columns plus a "New"
+  badge for devices created in the last 7 days.
+
+**M8 additions:**
+
+- OIDC sign-in (Authorization Code + PKCE; ~200 lines, no Authlib dep).
+  - `GET /v1/auth/oidc/start` — returns `{authorize_url, state}`; PKCE
+    verifier + state stashed in the `settings` table for 10 minutes.
+  - `GET /v1/auth/oidc/callback?code=...&state=...` — exchanges the code,
+    fetches `email` from the IdP's `userinfo` endpoint, validates against
+    `auth.oidc.allowed_emails`, then issues the standard session cookie
+    and redirects to `/`.
+  - Returns 404 when `auth.oidc.enabled` is false. See [docs/oidc.md](../../docs/oidc.md).
+- `seenoevil-backup` CLI: `snapshot` / `list` / `restore` over a tarball of
+  the SQLite DB + CA + cached models. `backup.local_path` and
+  `backup.retention` are honoured. See [docs/backup.md](../../docs/backup.md).
+- `litestream` config block (validated only) for the optional Litestream
+  sidecar that streams `policy.db` to S3-compatible storage. Wired up via
+  the `litestream` compose profile + `services/api/litestream.yml`.
+
 **Deferred to follow-up M1 PRs:**
 
 - OPA / rego integration (the in-tree policy engine has the same interface,
   so the swap is local to `policy.py`).
-- OIDC + WebAuthn (config knobs are present and validated; not consumed).
+- WebAuthn (config knobs are present and validated; not consumed).
 - Audit retention rotation worker.
 
 ## Local development

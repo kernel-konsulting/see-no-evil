@@ -1,10 +1,12 @@
-"""Admin auth endpoints (login, logout, first-time setup)."""
+"""Admin auth endpoints (login, logout, first-time setup, OIDC)."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
+from .. import oidc
 from ..auth import (
     admin_is_configured,
     clear_session,
@@ -12,10 +14,11 @@ from ..auth import (
     set_admin_password,
     verify_admin,
 )
-from ..schemas import LoginRequest, LoginResponse, SetupRequest
+from ..config import AppConfig
+from ..schemas import LoginRequest, LoginResponse, OIDCStartResponse, SetupRequest
 
 
-def make_router(get_session_dep) -> APIRouter:
+def make_router(get_session_dep, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/auth", tags=["auth"])
 
     @r.post("/setup", response_model=LoginResponse)
@@ -46,5 +49,46 @@ def make_router(get_session_dep) -> APIRouter:
     @r.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
     def logout(response: Response) -> None:
         clear_session(response)
+
+    @r.get("/oidc/start", response_model=OIDCStartResponse)
+    def oidc_start(
+        session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
+    ) -> OIDCStartResponse:
+        cfg = config.auth.oidc
+        if not cfg.enabled:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "oidc disabled")
+        if not cfg.redirect_url:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, "auth.oidc.redirect_url not configured"
+            )
+        try:
+            started = oidc.start_flow(cfg, session, redirect_url=cfg.redirect_url)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+        session.commit()
+        return OIDCStartResponse(authorize_url=started.authorize_url, state=started.state)
+
+    @r.get("/oidc/callback")
+    def oidc_callback(
+        response: Response,
+        code: str = Query(...),
+        state: str = Query(...),
+        session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
+    ) -> RedirectResponse:
+        cfg = config.auth.oidc
+        if not cfg.enabled:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "oidc disabled")
+        try:
+            finished = oidc.finish_flow(cfg, session, code=code, state=state)
+        except PermissionError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        redirect = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+        issue_session(session, redirect, finished.email)
+        session.commit()
+        return redirect
 
     return r

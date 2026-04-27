@@ -35,6 +35,7 @@ test = [
 [project.scripts]
 seenoevil-api = "seenoevil_api.__main__:main"
 seenoevil-setup = "seenoevil_api.wizard:main"
+seenoevil-backup = "seenoevil_api.backup:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

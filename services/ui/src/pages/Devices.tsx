@@ -1,12 +1,25 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listDevices, listProfiles, updateDevice, deleteDevice, createDevice } from "@/lib/api";
+import {
+  listDevices,
+  listProfiles,
+  updateDevice,
+  deleteDevice,
+  createDevice,
+} from "@/lib/api";
 import type { Device } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 
@@ -16,11 +29,19 @@ export default function Devices() {
     queryKey: ["devices"],
     queryFn: listDevices,
   });
-  const { data: profiles = [] } = useQuery({ queryKey: ["profiles"], queryFn: listProfiles });
+  const { data: profiles = [] } = useQuery({
+    queryKey: ["profiles"],
+    queryFn: listProfiles,
+  });
 
   const [editing, setEditing] = useState<Device | null>(null);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ mac: "", name: "", profile_id: "", bypass_proxy: false });
+  const [form, setForm] = useState({
+    mac: "",
+    name: "",
+    profile_id: "",
+    bypass_proxy: false,
+  });
 
   const updateMut = useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: Partial<Device> }) =>
@@ -75,7 +96,9 @@ export default function Devices() {
               <Input
                 placeholder="aa:bb:cc:dd:ee:ff"
                 value={form.mac}
-                onChange={(e) => setForm((f) => ({ ...f, mac: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, mac: e.target.value }))
+                }
               />
             </div>
             <div className="space-y-1">
@@ -83,7 +106,9 @@ export default function Devices() {
               <Input
                 placeholder="Kids iPad"
                 value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, name: e.target.value }))
+                }
               />
             </div>
             <div className="space-y-1">
@@ -91,7 +116,9 @@ export default function Devices() {
               <select
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={form.profile_id}
-                onChange={(e) => setForm((f) => ({ ...f, profile_id: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, profile_id: e.target.value }))
+                }
               >
                 <option value="">Select profile</option>
                 {profiles.map((p) => (
@@ -105,7 +132,9 @@ export default function Devices() {
               <input
                 type="checkbox"
                 checked={form.bypass_proxy}
-                onChange={(e) => setForm((f) => ({ ...f, bypass_proxy: e.target.checked }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, bypass_proxy: e.target.checked }))
+                }
               />
               Bypass MITM proxy for this device
             </label>
@@ -142,7 +171,9 @@ export default function Devices() {
               <Label>Name</Label>
               <Input
                 value={editing.name}
-                onChange={(e) => setEditing((d) => d && { ...d, name: e.target.value })}
+                onChange={(e) =>
+                  setEditing((d) => d && { ...d, name: e.target.value })
+                }
               />
             </div>
             <div className="space-y-1">
@@ -151,7 +182,9 @@ export default function Devices() {
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 value={editing.profile_id ?? ""}
                 onChange={(e) =>
-                  setEditing((d) => d && { ...d, profile_id: e.target.value || null })
+                  setEditing(
+                    (d) => d && { ...d, profile_id: e.target.value || null },
+                  )
                 }
               >
                 <option value="">Select profile</option>
@@ -167,7 +200,9 @@ export default function Devices() {
                 type="checkbox"
                 checked={editing.bypass_proxy}
                 onChange={(e) =>
-                  setEditing((d) => d && { ...d, bypass_proxy: e.target.checked })
+                  setEditing(
+                    (d) => d && { ...d, bypass_proxy: e.target.checked },
+                  )
                 }
               />
               Bypass MITM proxy for this device
@@ -201,55 +236,83 @@ export default function Devices() {
           {isLoading ? (
             <p className="p-6 text-sm text-muted-foreground">Loading…</p>
           ) : devices.length === 0 ? (
-            <p className="p-6 text-sm text-muted-foreground">No devices registered yet.</p>
+            <p className="p-6 text-sm text-muted-foreground">
+              No devices registered yet.
+            </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>MAC</TableHead>
+                  <TableHead>IP</TableHead>
+                  <TableHead>Vendor</TableHead>
                   <TableHead>Last seen</TableHead>
                   <TableHead>Profile</TableHead>
                   <TableHead className="w-20" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {devices.map((d) => (
-                  <TableRow key={d.id}>
-                    <TableCell className="font-medium">{d.name}</TableCell>
-                    <TableCell className="font-mono text-xs">{d.mac}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "—"}
-                    </TableCell>
-                    <TableCell>
-                      {profiles.find((p) => p.id === d.profile_id)?.name ?? "—"}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setEditing(d)}
-                          aria-label="Edit"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => {
-                            if (confirm(`Remove device "${d.name}"?`)) {
-                              deleteMut.mutate(d.id);
-                            }
-                          }}
-                          aria-label="Delete"
-                        >
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {devices.map((d) => {
+                  const isNew =
+                    d.created_at &&
+                    Date.now() - new Date(d.created_at).getTime() <
+                      7 * 24 * 60 * 60 * 1000;
+                  return (
+                    <TableRow key={d.id}>
+                      <TableCell className="font-medium">
+                        {d.name}
+                        {isNew && (
+                          <span className="ml-2 inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
+                            New
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {d.mac}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {d.ip ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {d.vendor ?? "—"}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {d.last_seen_at
+                          ? new Date(d.last_seen_at).toLocaleString()
+                          : "—"}
+                      </TableCell>
+                      <TableCell>
+                        {profiles.find((p) => p.id === d.profile_id)?.name ??
+                          "—"}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setEditing(d)}
+                            aria-label="Edit"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              if (confirm(`Remove device "${d.name}"?`)) {
+                                deleteMut.mutate(d.id);
+                              }
+                            }}
+                            aria-label="Delete"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}

@@ -73,6 +73,8 @@ class DeviceUpdate(BaseModel):
 class DeviceOut(DeviceBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    ip: str | None = None
+    vendor: str | None = None
     last_seen_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -155,9 +157,49 @@ class LoginResponse(BaseModel):
     email: str
 
 
+class OIDCStartResponse(BaseModel):
+    authorize_url: str
+    state: str
+
+
 class SetupRequest(BaseModel):
     email: str
     password: str = Field(min_length=8)
+
+
+class PanicSet(BaseModel):
+    """Enable panic-relax mode (temporary global allow)."""
+
+    duration_minutes: int = Field(default=60, ge=1, le=24 * 60)
+    reason: str = Field(default="", max_length=256)
+
+
+class PanicStatus(BaseModel):
+    active: bool
+    until: datetime | None = None
+    reason: str = ""
+    set_by: str | None = None
+    set_at: datetime | None = None
+
+
+class QuotaHeartbeat(BaseModel):
+    """Reports active-use minutes for a device since the last heartbeat."""
+
+    device_mac: str | None = None
+    device_id: int | None = None
+    minutes: int = Field(ge=0, le=24 * 60)
+
+    @field_validator("device_mac")
+    @classmethod
+    def _norm(cls, v: str | None) -> str | None:
+        return normalize_mac(v) if v else None
+
+
+class QuotaStatus(BaseModel):
+    device_id: int
+    day: str
+    minutes_used: int
+    minutes_quota: int
 
 
 class QuarantineOut(BaseModel):

@@ -47,6 +47,9 @@ class DecisionInput:
     today: date = field(default_factory=date.today)
     # Pre-fetched quota usage (minutes) for this device today.
     minutes_used_today: int = 0
+    # Global panic-relax override. When True, the engine short-circuits to
+    # ``allow`` with reason ``"panic_relax"``.
+    panic_relax: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,10 @@ def decide(
     config: AppConfig | None = None,
 ) -> DecisionOutput:
     """Evaluate the policy for one request and return an allow/block decision."""
+    # 0. Panic-relax — admin override that short-circuits everything below.
+    if inputs.panic_relax:
+        return DecisionOutput("allow", "panic_relax")
+
     # 1. Schedule
     if not _in_schedule(profile.schedule, inputs.now_dow, inputs.now_time):
         return DecisionOutput("block", "schedule")
