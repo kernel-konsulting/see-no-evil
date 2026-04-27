@@ -148,7 +148,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		slog.Error("hijack failed", "err", err)
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Tell the client the tunnel is established.
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
@@ -159,7 +159,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("TLS handshake failed", "host", host, "err", err)
 		return
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	// Re-use the plain HTTP handler on the decrypted connection.
 	httpSrv := &http.Server{ //nolint:gosec // timeouts set per-request
@@ -199,7 +199,7 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body for inspection.
 	var respBodySnap []byte
@@ -426,7 +426,7 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 		http.Error(w, "tunnel dial failed", http.StatusBadGateway)
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -437,7 +437,7 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 	if err != nil {
 		return
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 
@@ -544,7 +544,7 @@ func (h *Handler) isBypass(host string) bool {
 func writeBlockPage(w http.ResponseWriter, rawURL string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Blocked — see-no-evil</title></head>
 <body>

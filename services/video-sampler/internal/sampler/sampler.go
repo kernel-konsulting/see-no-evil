@@ -106,7 +106,7 @@ func (s *Server) Sample(stream classifyv1.VideoSampler_SampleServer) error {
 	if err != nil {
 		return fmt.Errorf("mkdtemp: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	videoPath := filepath.Join(tmpDir, "in.bin")
 	requestID, frames, written, err := receiveStream(stream, videoPath, s.cfg.MaxVideoBytes)
@@ -126,9 +126,9 @@ func (s *Server) Sample(stream classifyv1.VideoSampler_SampleServer) error {
 		// Fail open: if we can't sample frames the proxy must allow the video.
 		samplesTotal.WithLabelValues("error").Inc()
 		return stream.SendAndClose(&classifyv1.SampleVideoResponse{
-			Action:     classifyv1.Action_ACTION_ALLOW,
-			Reason:     "video_sampler:ffmpeg_failed",
-			LatencyMs:  time.Since(t0).Milliseconds(),
+			Action:    classifyv1.Action_ACTION_ALLOW,
+			Reason:    "video_sampler:ffmpeg_failed",
+			LatencyMs: time.Since(t0).Milliseconds(),
 		})
 	}
 
@@ -157,7 +157,7 @@ func receiveStream(stream classifyv1.VideoSampler_SampleServer, dest string, max
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("create %s: %w", dest, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var (
 		requestID string

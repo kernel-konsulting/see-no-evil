@@ -57,15 +57,15 @@ func main() {
 		slog.Error("dial image-classifier", "err", err, "addr", imageAddr)
 		os.Exit(1)
 	}
-	defer imgConn.Close()
+	defer func() { _ = imgConn.Close() }()
 
 	srv := sampler.NewServer(sampler.Config{
-		Image:           classifyv1.NewImageClassifierClient(imgConn),
-		DefaultFrames:   maxFrames,
-		MaxVideoBytes:   maxBytes,
-		FFmpegPath:      envOr("FFMPEG_PATH", "ffmpeg"),
-		ThumbnailWidth:  256,
-		ThumbnailJPEGQ:  60,
+		Image:          classifyv1.NewImageClassifierClient(imgConn),
+		DefaultFrames:  maxFrames,
+		MaxVideoBytes:  maxBytes,
+		FFmpegPath:     envOr("FFMPEG_PATH", "ffmpeg"),
+		ThumbnailWidth: 256,
+		ThumbnailJPEGQ: 60,
 	})
 
 	gs := grpc.NewServer()

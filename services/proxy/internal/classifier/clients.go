@@ -31,7 +31,7 @@ func NewClientsFromAddrs(imageAddr, textAddr, videoAddr string) (*Clients, error
 	}
 	txtConn, err := dial(textAddr)
 	if err != nil {
-		imgConn.Close()
+		_ = imgConn.Close()
 		return nil, fmt.Errorf("dial text-classifier at %s: %w", textAddr, err)
 	}
 	c := &Clients{
@@ -42,8 +42,8 @@ func NewClientsFromAddrs(imageAddr, textAddr, videoAddr string) (*Clients, error
 	if videoAddr != "" {
 		vidConn, verr := dial(videoAddr)
 		if verr != nil {
-			imgConn.Close()
-			txtConn.Close()
+			_ = imgConn.Close()
+			_ = txtConn.Close()
 			return nil, fmt.Errorf("dial video-sampler at %s: %w", videoAddr, verr)
 		}
 		c.Video = classifyv1.NewVideoSamplerClient(vidConn)

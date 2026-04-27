@@ -106,7 +106,7 @@ func startGRPC(t *testing.T, srv classifyv1.VideoSamplerServer) (classifyv1.Vide
 		t.Fatalf("dial: %v", err)
 	}
 	cleanup := func() {
-		conn.Close()
+		_ = conn.Close()
 		gs.GracefulStop()
 	}
 	return classifyv1.NewVideoSamplerClient(conn), cleanup
