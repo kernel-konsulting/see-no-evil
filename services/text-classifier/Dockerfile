@@ -17,11 +17,11 @@ WORKDIR /build
 RUN pip install --upgrade pip \
  && pip install grpcio-tools==1.67.1 protobuf==5.29.2
 
-COPY pyproject.toml ./
-COPY src/ ./src/
+COPY services/text-classifier/pyproject.toml ./
+COPY services/text-classifier/src/ ./src/
 RUN pip install --prefix=/install ".[]"
 
-COPY ../../shared/proto/classify.proto /proto/classify.proto
+COPY shared/proto/classify.proto /proto/classify.proto
 RUN python -m grpc_tools.protoc \
       -I/proto \
       --python_out=/install/lib/python3.12/site-packages/seenoevil_text_classifier/generated \

@@ -33,7 +33,9 @@ from .generated import classify_pb2, classify_pb2_grpc
 log = logging.getLogger("text-classifier")
 
 MODEL_PATH = Path(os.environ.get("TEXT_CLASSIFIER_MODEL_PATH", "/data/models/text_classifier.onnx"))
-TOKENIZER_PATH = Path(os.environ.get("TEXT_CLASSIFIER_TOKENIZER_PATH", "/data/models/text_tokenizer.json"))
+TOKENIZER_PATH = Path(
+    os.environ.get("TEXT_CLASSIFIER_TOKENIZER_PATH", "/data/models/text_tokenizer.json")
+)
 DEVICE = os.environ.get("TEXT_CLASSIFIER_DEVICE", "cpu").lower()
 PORT = int(os.environ.get("TEXT_CLASSIFIER_PORT", "50052"))
 WORKERS = int(os.environ.get("TEXT_CLASSIFIER_WORKERS", "4"))
@@ -173,8 +175,7 @@ def serve() -> None:
     for path, name in [(MODEL_PATH, "model"), (TOKENIZER_PATH, "tokenizer")]:
         if not path.exists():
             raise RuntimeError(
-                f"{name.capitalize()} not found at {path}. "
-                "Run the updater container first."
+                f"{name.capitalize()} not found at {path}. Run the updater container first."
             )
 
     log.info("loading model from %s (device=%s)", MODEL_PATH, DEVICE)

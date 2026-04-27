@@ -24,8 +24,8 @@ RUN apk add --no-cache curl ca-certificates \
 FROM ghcr.io/0xerr0r/blocky:v0.24 AS runtime
 
 COPY --from=downloader /lists/ /data/lists/
-COPY blocky.yaml /etc/blocky/blocky.yaml
-COPY entrypoint.sh /entrypoint.sh
+COPY services/dns/blocky.yaml /etc/blocky/blocky.yaml
+COPY services/dns/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 53/udp 53/tcp

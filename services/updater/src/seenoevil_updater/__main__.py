@@ -1,4 +1,5 @@
 """Entry point."""
+
 from .updater import run
 
 

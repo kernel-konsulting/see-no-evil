@@ -12,8 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /build
-COPY pyproject.toml ./
-COPY src/ ./src/
+COPY services/updater/pyproject.toml ./
+COPY services/updater/src/ ./src/
 RUN pip install --upgrade pip && pip install --prefix=/install ".[]"
 
 # -----------------------------------------------------------------------------
