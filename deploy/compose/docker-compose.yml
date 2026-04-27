@@ -1,0 +1,269 @@
+# =============================================================================
+# see-no-evil — Docker Compose (M0 scaffolding)
+# =============================================================================
+#
+# Profiles:
+#   core              api + ui + dns + proxy + classifiers + updater (default)
+#   scanner           + the optional nmap-based device scanner
+#   gpu               classifiers swapped for CUDA-enabled images
+#   redis             swap embedded cache for Redis
+#   postgres          swap SQLite for Postgres
+#   observability     Vector + VictoriaMetrics + Grafana
+#   vpn-tailscale     Tailscale sidecar
+#   vpn-wg            wg-easy
+#
+# Usage:
+#   docker compose --profile core up -d
+#   docker compose --profile core --profile postgres --profile redis up -d
+#
+# Note: at M0 every service is a stub that just sleeps. This file proves the
+# topology works; functional behavior lands in M1.
+# =============================================================================
+
+name: seenoevil
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  # Public-facing: DNS, proxy, UI ingress.
+  edge:
+    driver: bridge
+
+  # Internal-only: classifiers, API, policy. NO egress to the internet.
+  # `internal: true` is the Compose equivalent of "default-deny egress".
+  internal:
+    driver: bridge
+    internal: true
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  data:        # /data — DB, CA, models, lists, audit, backups
+  caddy_data:  # Caddy's internal CA + ACME state
+  caddy_config:
+  postgres_data:
+  redis_data:
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # -------------------------------------------------------------------------
+  # core profile
+  # -------------------------------------------------------------------------
+  api:
+    profiles: [core]
+    build: ../../services/api
+    image: ghcr.io/kernel-konsulting/seenoevil-api:dev
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - data:/data
+      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+    environment:
+      SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+
+  ui:
+    profiles: [core]
+    build: ../../services/ui
+    image: ghcr.io/kernel-konsulting/seenoevil-ui:dev
+    restart: unless-stopped
+    networks: [internal]
+    depends_on: [api]
+
+  caddy:
+    profiles: [core]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    networks: [edge, internal]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      # M1 will mount a generated Caddyfile here.
+    depends_on: [ui, api]
+
+  dns:
+    profiles: [core]
+    build: ../../services/dns
+    image: ghcr.io/kernel-konsulting/seenoevil-dns:dev
+    restart: unless-stopped
+    # DNS lives on the edge: clients must be able to reach it.
+    networks: [edge]
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - data:/data
+
+  proxy:
+    profiles: [core]
+    build: ../../services/proxy
+    image: ghcr.io/kernel-konsulting/seenoevil-proxy:dev
+    restart: unless-stopped
+    networks: [edge, internal]
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - data:/data
+    depends_on: [api, image-classifier, text-classifier, video-sampler]
+
+  image-classifier:
+    profiles: [core]
+    build: ../../services/image-classifier
+    image: ghcr.io/kernel-konsulting/seenoevil-image-classifier:dev
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - data:/data
+
+  text-classifier:
+    profiles: [core]
+    build: ../../services/text-classifier
+    image: ghcr.io/kernel-konsulting/seenoevil-text-classifier:dev
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - data:/data
+
+  video-sampler:
+    profiles: [core]
+    build: ../../services/video-sampler
+    image: ghcr.io/kernel-konsulting/seenoevil-video-sampler:dev
+    restart: unless-stopped
+    networks: [internal]
+    depends_on: [image-classifier]
+
+  # The updater is the ONLY container with unrestricted egress.
+  updater:
+    profiles: [core]
+    build: ../../services/updater
+    image: ghcr.io/kernel-konsulting/seenoevil-updater:dev
+    restart: unless-stopped
+    networks: [edge]
+    volumes:
+      - data:/data
+
+  # -------------------------------------------------------------------------
+  # scanner profile (optional)
+  # -------------------------------------------------------------------------
+  scanner:
+    profiles: [scanner]
+    build: ../../services/scanner
+    image: ghcr.io/kernel-konsulting/seenoevil-scanner:dev
+    restart: unless-stopped
+    # Needs to see the LAN to scan it. Host networking is the simplest route;
+    # alternatively use a macvlan network + CAP_NET_RAW + CAP_NET_ADMIN.
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    volumes:
+      - data:/data
+
+  # -------------------------------------------------------------------------
+  # postgres profile (optional, replaces SQLite)
+  # -------------------------------------------------------------------------
+  postgres:
+    profiles: [postgres]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: seenoevil
+      POSTGRES_USER: seenoevil
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+
+  # -------------------------------------------------------------------------
+  # redis profile (optional, replaces embedded cache)
+  # -------------------------------------------------------------------------
+  redis:
+    profiles: [redis]
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [internal]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+
+  # -------------------------------------------------------------------------
+  # vpn-tailscale profile (optional)
+  # -------------------------------------------------------------------------
+  tailscale:
+    profiles: [vpn-tailscale]
+    image: tailscale/tailscale:stable
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - data:/var/lib/tailscale
+    environment:
+      TS_HOSTNAME: seenoevil
+      TS_AUTHKEY_FILE: /run/secrets/tailscale_authkey
+    secrets:
+      - tailscale_authkey
+
+  # -------------------------------------------------------------------------
+  # vpn-wg profile (optional)
+  # -------------------------------------------------------------------------
+  wg-easy:
+    profiles: [vpn-wg]
+    image: ghcr.io/wg-easy/wg-easy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"   # web UI
+    volumes:
+      - data:/etc/wireguard
+
+  # -------------------------------------------------------------------------
+  # observability profile (optional)
+  # -------------------------------------------------------------------------
+  vector:
+    profiles: [observability]
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    networks: [internal]
+
+  victoriametrics:
+    profiles: [observability]
+    image: victoriametrics/victoria-metrics:stable
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - data:/victoria-metrics-data
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana-oss:latest
+    restart: unless-stopped
+    networks: [internal]
+    ports:
+      - "3000:3000"
+
+# ---------------------------------------------------------------------------
+# Secrets (file-based; create them under deploy/compose/secrets/)
+# ---------------------------------------------------------------------------
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  tailscale_authkey:
+    file: ./secrets/tailscale_authkey.txt

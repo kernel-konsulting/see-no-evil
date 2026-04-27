@@ -1,0 +1,92 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install --no-cache-dir 'ruff==0.6.9'
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+
+  go:
+    name: Go (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+      - name: Detect Go modules
+        id: detect
+        run: |
+          if find . -name go.mod -not -path './.git/*' | grep -q .; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: golangci-lint
+        if: steps.detect.outputs.has_go == 'true'
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+      - name: skip
+        if: steps.detect.outputs.has_go != 'true'
+        run: echo "no Go modules yet (M0); skipping"
+
+  opa:
+    name: OPA (rego)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OPA
+        run: |
+          curl -fsSL -o /usr/local/bin/opa \
+            https://github.com/open-policy-agent/opa/releases/download/v0.68.0/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+      - name: Detect rego files
+        id: detect
+        run: |
+          if find . -name '*.rego' -not -path './.git/*' | grep -q .; then
+            echo "has_rego=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_rego=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: opa fmt --diff
+        if: steps.detect.outputs.has_rego == 'true'
+        run: opa fmt --diff .
+      - name: opa test
+        if: steps.detect.outputs.has_rego == 'true'
+        run: opa test -v .
+      - name: skip
+        if: steps.detect.outputs.has_rego != 'true'
+        run: echo "no rego policies yet (M0); skipping"
+
+  yaml:
+    name: YAML (yamllint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install yamllint
+        run: pip install --no-cache-dir 'yamllint==1.35.1'
+      - name: yamllint
+        run: yamllint -c .yamllint.yml .
