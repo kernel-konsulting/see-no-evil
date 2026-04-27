@@ -1,0 +1,365 @@
+# =============================================================================
+# see-no-evil — example configuration
+# =============================================================================
+#
+# Copy this file to `config.yaml` and edit. Every key has a sensible default;
+# uncomment and change only what you need.
+#
+# Conventions:
+#   * Durations are Go-style strings: "30s", "5m", "24h", "7d".
+#   * Sizes use IEC suffixes: "10MiB", "2GiB".
+#   * Paths are inside the container (default data root: /data).
+#
+# This file is parsed once at startup. Most live changes are made through the
+# admin UI; this file is for bootstrap defaults and infra-level choices that
+# need a restart.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# pod — global identity and storage
+# -----------------------------------------------------------------------------
+pod:
+  # Hostname the admin UI is reachable at on your LAN. The install wizard will
+  # try to register an mDNS record for this. Pick something memorable.
+  hostname: seenoevil.lan
+
+  # Where persistent data lives inside the containers. Mount a volume here.
+  data_dir: /data
+
+  # IANA tz name; used for schedules and quotas.
+  timezone: America/Los_Angeles
+
+
+# -----------------------------------------------------------------------------
+# db — control-plane database
+# -----------------------------------------------------------------------------
+# SQLite by default — perfect for ~50 devices and zero ops.
+# For org / non-profit / multi-site deployments, point at Postgres.
+# Alembic migrations cover both backends.
+db:
+  url: sqlite:///data/policy.db
+  # url: postgresql+psycopg://seenoevil:CHANGEME@postgres:5432/seenoevil
+
+  # Connection pool (ignored for sqlite).
+  pool_size: 5
+  max_overflow: 10
+
+
+# -----------------------------------------------------------------------------
+# cache — in-process by default; Redis for HA / multi-replica deployments
+# -----------------------------------------------------------------------------
+cache:
+  kind: embedded   # one of: embedded, redis
+  # When kind: redis
+  # url: redis://redis:6379/0
+  # password_file: /run/secrets/redis_password
+
+
+# -----------------------------------------------------------------------------
+# dns — Blocky resolver settings
+# -----------------------------------------------------------------------------
+dns:
+  # The IP your devices / DHCP server should point at. The container binds 53.
+  bind: 0.0.0.0:53
+
+  # Upstream DoH/DoT resolvers. Default: Cloudflare 1.1.1.3 (family — blocks
+  # malware + adult content). The install wizard prompts for this; common
+  # alternatives:
+  #   https://dns.quad9.net/dns-query           (Quad9, malware only)
+  #   https://dns.adguard-dns.com/dns-query     (AdGuard family)
+  #   https://doh.opendns.com/dns-query         (OpenDNS FamilyShield)
+  upstreams:
+    - https://1.1.1.3/dns-query
+
+  # Curated blocklists. Pulled on the schedule defined in `updates.lists`.
+  blocklists:
+    stevenblack_unified: true
+    oisd_full:           true
+    nsfw_extras:         true
+    ads_and_trackers:    false   # opt-in; can break sites for non-monitored devices
+
+
+# -----------------------------------------------------------------------------
+# proxy — MITM data-plane
+# -----------------------------------------------------------------------------
+# This is the *kids' traffic* TLS surface. Devices must trust the CA below.
+# This is COMPLETELY SEPARATE from the admin UI cert (see `ui.tls`).
+proxy:
+  # Listening sockets.
+  http:  0.0.0.0:8080
+  https: 0.0.0.0:8443
+
+  ca:
+    # auto: generate a CA on first start; private key is encrypted with `age`
+    #       using a passphrase prompted at install. Cert is exported to
+    #       `${pod.data_dir}/ca/seenoevil-ca.crt` for distribution to devices.
+    # byo:  use the cert/key paths below. The pod will not generate anything.
+    mode: auto
+    # cert_path: /data/ca/seenoevil-ca.crt
+    # key_path:  /data/ca/seenoevil-ca.key
+
+  # Domains the proxy will NOT MITM (passes through with SNI-only routing).
+  # Useful for cert-pinned apps and high-risk financial sites.
+  bypass_domains:
+    - "*.apple.com"
+    - "*.icloud.com"
+    - "netflix.com"
+    - "*.netflix.com"
+    - "*.bank-of-america.com"
+
+  # Force-on safe-search where the upstream supports it.
+  safesearch:
+    google:             true
+    bing:               true
+    duckduckgo:         true
+    youtube_restricted: true   # injects PREF/Restrict-Mode cookie
+
+  # Maximum body size to buffer for inspection. Larger responses stream through
+  # without body inspection (URL + content-type rules still apply).
+  max_inspect_body: 10MiB
+
+
+# -----------------------------------------------------------------------------
+# ui — admin UI / API surface
+# -----------------------------------------------------------------------------
+# This is the YOU-the-admin TLS surface. Has nothing to do with the MITM CA.
+ui:
+  # Caddy serves the React UI + reverse-proxies the FastAPI backend.
+  reverse_proxy: caddy   # one of: caddy, external
+
+  tls:
+    # internal:    Caddy's local CA (browser warning the first time)
+    # letsencrypt: only if `pod.hostname` is publicly resolvable
+    # byo:         provide cert_path / key_path below
+    mode: internal
+    # cert_path: /data/ui/cert.pem
+    # key_path:  /data/ui/key.pem
+
+
+# -----------------------------------------------------------------------------
+# auth — admin authentication
+# -----------------------------------------------------------------------------
+auth:
+  builtin:
+    # Set on first start; password is set via the install wizard, not this file.
+    admin_email: admin@example.local
+
+  # Optional OIDC. If `issuer` is set, OIDC takes precedence over the built-in
+  # admin for sign-in (built-in remains for break-glass).
+  oidc:
+    enabled: false
+    # issuer:        https://accounts.google.com
+    # client_id:     ""
+    # client_secret_file: /run/secrets/oidc_client_secret
+    # allowed_emails: ["you@example.com"]
+
+  # WebAuthn / passkey support. Recommended once you have a hostname that
+  # resolves consistently on your LAN.
+  webauthn:
+    enabled: true
+
+
+# -----------------------------------------------------------------------------
+# classifiers — model selection and runtime
+# -----------------------------------------------------------------------------
+classifiers:
+  image:
+    # `freepik`   = Freepik/nsfw_image_detector (multi-class, soft+hard NSFW)
+    # `falconsai` = Falconsai/nsfw_image_detection (binary, smaller / faster)
+    model: freepik
+
+    # Inference backend. `cpu` works everywhere. `cuda` / `openvino` / `coreml`
+    # require the corresponding base image (see deploy/compose/gpu.yml).
+    device: cpu
+
+    # Per-class thresholds (0.0–1.0). Anything >= threshold is "positive".
+    # Per-profile overrides live under `profiles[].image_thresholds`.
+    thresholds:
+      porn:      0.60
+      hentai:    0.60
+      sexy:      0.85
+      neutral:   1.01   # never positive
+      drawing:   1.01
+
+  text:
+    # Toxicity / NSFW text classifier; runs on URL paths and inspected bodies.
+    model: unitary/toxic-bert
+    device: cpu
+    thresholds:
+      toxic:    0.80
+      obscene:  0.80
+      threat:   0.80
+
+  video:
+    # Sample N evenly-spaced frames per video; if any frame trips the image
+    # classifier, the whole response is dropped.
+    sample_frames: 8
+    max_video_size: 50MiB
+
+
+# -----------------------------------------------------------------------------
+# profiles — per-persona policies; devices attach to one profile
+# -----------------------------------------------------------------------------
+profiles:
+  - name: kids
+    description: Strict filtering for children's devices.
+    image_thresholds:
+      porn:   0.40
+      hentai: 0.40
+      sexy:   0.60
+    schedule:
+      # Allowed-internet windows (24h, local TZ). Outside windows: blocked.
+      monday_friday:   "07:00-20:00"
+      saturday_sunday: "08:00-21:00"
+    quota_minutes_per_day: 120
+    allow:
+      domains:
+        - khanacademy.org
+        - pbskids.org
+      youtube_channels:
+        - UC4a-Gbdw7vOaccHmFo40b9g   # Khan Academy
+    deny:
+      domains:
+        - tiktok.com
+      youtube_channels: []
+    notify_on_block: true
+
+  - name: adults
+    description: Effectively unfiltered. Logs allow/block decisions only.
+    image_thresholds:
+      porn:    1.01
+      hentai:  1.01
+      sexy:    1.01
+    schedule: {}
+    quota_minutes_per_day: 0   # 0 = unlimited
+    allow: { domains: [], youtube_channels: [] }
+    deny:  { domains: [], youtube_channels: [] }
+    notify_on_block: false
+
+  - name: guests
+    description: Default for unrecognized devices.
+    image_thresholds:
+      porn:   0.60
+      hentai: 0.60
+      sexy:   0.90
+    schedule: {}
+    quota_minutes_per_day: 0
+    allow: { domains: [], youtube_channels: [] }
+    deny:  { domains: [], youtube_channels: [] }
+    notify_on_block: false
+
+
+# -----------------------------------------------------------------------------
+# devices — static MAC → profile bindings
+# -----------------------------------------------------------------------------
+# The scanner (if enabled) will surface unknown devices in the UI for
+# assignment. You can also pre-declare them here.
+devices:
+  default_profile: guests
+  static:
+    # - mac: "aa:bb:cc:dd:ee:ff"
+    #   name: "Kid-A iPad"
+    #   profile: kids
+    # - mac: "11:22:33:44:55:66"
+    #   name: "Living Room TV"
+    #   profile: adults
+    #   bypass_proxy: true   # DNS filtering only; useful for cert-pinned apps
+
+
+# -----------------------------------------------------------------------------
+# vpn — optional remote-access transport
+# -----------------------------------------------------------------------------
+vpn:
+  kind: none   # one of: none, tailscale, wg-easy
+
+  # When kind: tailscale
+  # tailscale:
+  #   authkey_file: /run/secrets/tailscale_authkey
+  #   advertise_routes: [192.168.1.0/24]
+
+  # When kind: wg-easy
+  # wg_easy:
+  #   admin_password_file: /run/secrets/wg_admin_password
+  #   public_endpoint: vpn.example.com:51820
+
+
+# -----------------------------------------------------------------------------
+# scanner — optional network discovery (nmap + mDNS / SSDP)
+# -----------------------------------------------------------------------------
+# Disabled by default. Requires NET_ADMIN capability or host networking
+# (see deploy/compose/scanner.yml). Results are surfaced in the UI as
+# suggestions to assign devices to profiles. NEVER leaves the LAN.
+scanner:
+  enabled: false
+  cidrs:
+    - 192.168.1.0/24
+  interval: 1h
+  # nmap scan profile: `discovery` (host up only) or `light` (+ top-100 ports)
+  profile: discovery
+  # Pull the IEEE OUI database for vendor lookup. Cached locally after first pull.
+  enrich_with_oui: true
+
+
+# -----------------------------------------------------------------------------
+# updates — what to pull from the internet, and how often
+# -----------------------------------------------------------------------------
+# This is the ONLY component permitted to make outbound HTTP. Classifier and
+# proxy containers have egress blocked by NetworkPolicy / firewall rules.
+updates:
+  lists:
+    enabled:  true
+    interval: 24h
+  models:
+    # Pull model weights on first start, verify SHA-256, cache to data_dir.
+    # After that, the pod runs fully offline.
+    fetch_on_start: true
+    # Pin to specific revisions for reproducibility (see services/*-classifier/MODELS.md).
+    image_revision: "v1.0.0"
+    text_revision:  "v1.0.0"
+  oui:
+    enabled:  true
+    interval: 168h   # weekly
+
+
+# -----------------------------------------------------------------------------
+# observability
+# -----------------------------------------------------------------------------
+observability:
+  # `minimal` = local logs + Prometheus metrics endpoint
+  # `full`    = + Vector → VictoriaMetrics + Grafana dashboards (see compose profile)
+  level: minimal
+
+  # Audit logging for allow/block decisions (per-profile, per-device).
+  # Stored in DB; rotated every `retention_days`.
+  audit:
+    retention_days: 30
+
+
+# -----------------------------------------------------------------------------
+# notifications — opt-in outbound for "kid hit a block" style alerts
+# -----------------------------------------------------------------------------
+notifications:
+  ntfy:
+    enabled: false
+    # url: https://ntfy.sh/CHANGE-ME
+    # priority: default
+  webhooks:
+    # - name: parents-slack
+    #   url: https://hooks.slack.com/services/...
+    #   on: [block, quota_exceeded]
+
+
+# -----------------------------------------------------------------------------
+# backup
+# -----------------------------------------------------------------------------
+backup:
+  local_path: /data/backups
+  interval:   24h
+  retention:  14
+  # Optional encrypted offsite (Litestream-style streaming for SQLite).
+  # offsite:
+  #   kind: s3
+  #   bucket: my-bucket
+  #   prefix: seenoevil/
+  #   age_recipients_file: /run/secrets/age_recipients.txt

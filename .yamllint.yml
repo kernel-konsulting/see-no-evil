@@ -1,0 +1,15 @@
+extends: relaxed
+
+rules:
+  # We rely on comments and structural readability over strict whitespace.
+  line-length: disable
+  document-start: disable
+  truthy: disable
+  comments: disable
+  comments-indentation: disable
+  indentation: disable
+  empty-lines: disable
+  brackets: disable
+  braces: disable
+  colons: disable
+  trailing-spaces: enable
