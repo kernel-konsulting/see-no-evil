@@ -132,7 +132,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(auth.make_router(db_dep, get_config_dep))
     app.include_router(profiles.make_router(db_dep, require_admin))
     app.include_router(devices.make_router(db_dep, require_admin, get_config_dep))
-    app.include_router(audit.make_router(db_dep))
+    app.include_router(audit.make_router(db_dep, require_admin))
     app.include_router(quarantine.make_router(db_dep, require_admin))
     app.include_router(quota.make_router(db_dep, require_admin))
     app.include_router(panic.make_router(db_dep, require_admin, get_config_dep))

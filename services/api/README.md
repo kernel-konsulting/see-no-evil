@@ -23,12 +23,12 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   - `POST /v1/auth/setup` (only valid before any admin exists)
   - `POST /v1/auth/login`
   - `POST /v1/auth/logout`
-  - `GET/POST/PATCH/DELETE /v1/profiles[/{id}]`
-  - `GET/POST/PATCH/DELETE /v1/devices[/{id}]`
+  - `GET/POST/PATCH/DELETE /v1/profiles[/{id}]` (admin)
+  - `GET/POST/PATCH/DELETE /v1/devices[/{id}]` (admin)
   - `POST /v1/devices/discover` (M1.6 — scanner upserts MAC list)
-  - `GET  /v1/audit`
+  - `GET  /v1/audit` (admin)
   - `POST /v1/decide` (called by the proxy)
-  - `GET/POST/DELETE /v1/quarantine[/{id}[/allow|/deny]]` (M3 — quarantine queue)
+  - `GET/POST/DELETE /v1/quarantine[/{id}[/allow|/deny]]` (admin; M3 quarantine queue)
 
 **M2 additions:**
 
@@ -48,7 +48,7 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 - Panic-relax mode persisted in `settings["panic_relax"]`. When active the
   decide engine short-circuits to `allow` with reason `panic_relax`. State
   changes write an `AuditDecision` row.
-  - `GET    /v1/admin/panic` — current state
+  - `GET    /v1/admin/panic` — current state (admin)
   - `POST   /v1/admin/panic` — `{duration_minutes, reason}` (admin)
   - `DELETE /v1/admin/panic` — disable now (admin)
 - Quota heartbeat — proxy/agents POST minutes of active use; the row in

@@ -1,10 +1,16 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "@/lib/auth";
+import { useAuth } from "@/lib/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
 
 export default function Login() {
@@ -21,7 +27,11 @@ export default function Login() {
       await login(username, password);
       navigate("/dashboard", { replace: true });
     } catch {
-      toast({ title: "Login failed", description: "Check your credentials.", variant: "destructive" });
+      toast({
+        title: "Login failed",
+        description: "Check your credentials.",
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }

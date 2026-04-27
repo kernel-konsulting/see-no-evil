@@ -29,6 +29,7 @@ def test_panic_get_default_inactive(admin_client: TestClient) -> None:
 
 
 def test_panic_requires_admin_to_set(client: TestClient) -> None:
+    assert client.get("/v1/admin/panic").status_code == 401
     assert client.post("/v1/admin/panic", json={"duration_minutes": 5}).status_code == 401
     assert client.delete("/v1/admin/panic").status_code == 401
 

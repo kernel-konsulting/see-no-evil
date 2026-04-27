@@ -1,4 +1,5 @@
 import axios from "axios";
+import { clearStoredAuth } from "./storage";
 
 // ---------------------------------------------------------------------------
 // Types — mirror FastAPI schemas.py
@@ -69,7 +70,7 @@ http.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem("sne_authenticated");
+      clearStoredAuth();
       window.location.href = "/login";
     }
     return Promise.reject(err);

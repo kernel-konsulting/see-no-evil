@@ -14,11 +14,11 @@ from ..schemas import ProfileCreate, ProfileOut, ProfileUpdate
 def make_router(get_session_dep, require_admin) -> APIRouter:
     r = APIRouter(prefix="/v1/profiles", tags=["profiles"])
 
-    @r.get("", response_model=list[ProfileOut])
+    @r.get("", response_model=list[ProfileOut], dependencies=[Depends(require_admin)])
     def list_profiles(session: Session = Depends(get_session_dep)) -> list[Profile]:
         return list(session.scalars(select(Profile).order_by(Profile.id)))
 
-    @r.get("/{profile_id}", response_model=ProfileOut)
+    @r.get("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
     def get_profile(profile_id: int, session: Session = Depends(get_session_dep)) -> Profile:
         obj = session.get(Profile, profile_id)
         if obj is None:
