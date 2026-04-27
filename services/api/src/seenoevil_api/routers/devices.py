@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..config import AppConfig
 from ..models import Device, Profile
-from ..schemas import DeviceCreate, DeviceOut, DeviceUpdate
+from ..schemas import (
+    DeviceCreate,
+    DeviceOut,
+    DeviceUpdate,
+    DiscoverRequest,
+    DiscoverResponse,
+    DiscoverResponseItem,
+)
 
 
-def make_router(get_session_dep, require_admin) -> APIRouter:
+def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/devices", tags=["devices"])
 
     @r.get("", response_model=list[DeviceOut])
@@ -78,5 +88,57 @@ def make_router(get_session_dep, require_admin) -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
         session.delete(obj)
         session.commit()
+
+    @r.post(
+        "/discover",
+        response_model=DiscoverResponse,
+        dependencies=[Depends(require_admin)],
+    )
+    def discover_devices(
+        body: DiscoverRequest,
+        session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
+    ) -> DiscoverResponse:
+        """Upsert devices observed by the scanner.
+
+        New MACs are created and assigned to the configured default profile.
+        Existing devices have ``last_seen_at`` refreshed and (optionally) the
+        hostname populated if it was previously empty. Profile assignment is
+        never overwritten by the scanner.
+        """
+        default_profile = session.scalars(
+            select(Profile).where(Profile.name == config.devices.default_profile)
+        ).first()
+        if default_profile is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"default profile {config.devices.default_profile!r} not found",
+            )
+
+        items: list[DiscoverResponseItem] = []
+        now = datetime.now(UTC).replace(tzinfo=None)
+        for d in body.devices:
+            existing = session.scalars(select(Device).where(Device.mac == d.mac)).first()
+            if existing is not None:
+                existing.last_seen_at = now
+                if not existing.name and d.hostname:
+                    existing.name = d.hostname
+                items.append(DiscoverResponseItem(mac=d.mac, device_id=existing.id, created=False))
+                continue
+            new_dev = Device(
+                mac=d.mac,
+                name=d.hostname,
+                profile_id=default_profile.id,
+                last_seen_at=now,
+            )
+            session.add(new_dev)
+            session.flush()
+            items.append(DiscoverResponseItem(mac=d.mac, device_id=new_dev.id, created=True))
+        session.commit()
+        return DiscoverResponse(
+            profile_id=default_profile.id,
+            profile_name=default_profile.name,
+            items=items,
+        )
 
     return r

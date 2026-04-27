@@ -222,6 +222,9 @@ profiles:
     deny:
       domains:
         - tiktok.com
+      url_keywords:
+        - "/adult/"
+        - "/nsfw/"
       youtube_channels: []
     notify_on_block: true
 

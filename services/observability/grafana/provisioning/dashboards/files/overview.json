@@ -1,0 +1,45 @@
+{
+  "title": "see-no-evil — overview",
+  "uid": "sne-overview",
+  "tags": ["seenoevil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Decisions/min",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(seenoevil_decide_total[5m])) * 60"}]
+    },
+    {
+      "type": "stat",
+      "title": "Block ratio",
+      "id": 2,
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{
+        "expr": "sum(rate(seenoevil_decide_total{decision=\"block\"}[5m])) / clamp_min(sum(rate(seenoevil_decide_total[5m])), 1e-9)"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Decisions over time",
+      "id": 3,
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(seenoevil_decide_total[5m])) by (decision)", "legendFormat": "{{decision}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Devices discovered (scanner)",
+      "id": 4,
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [{"expr": "scanner_devices_seen"}]
+    }
+  ]
+}

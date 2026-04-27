@@ -45,6 +45,7 @@ class Profile(Base):
     quota_minutes_per_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     allow_domains: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     deny_domains: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    deny_url_keywords: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     allow_youtube_channels: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     deny_youtube_channels: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     notify_on_block: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -118,3 +119,31 @@ class Setting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
     )
+
+
+class QuarantineItem(Base):
+    """A blocked request held for admin review (M3 quarantine queue)."""
+
+    __tablename__ = "quarantine"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    device_id: Mapped[int | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
+    )
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reason: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    classifier_scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # Optional inline base64 PNG/JPEG of a blurred preview (capped at a few KB).
+    # Real previews land in M5 with the video sampler; M3 stores the field.
+    thumbnail_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Lifecycle: pending | allowed | denied
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (Index("ix_quarantine_status_ts", "status", "ts"),)

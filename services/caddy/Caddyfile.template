@@ -1,0 +1,50 @@
+# =============================================================================
+# see-no-evil — Caddyfile template
+#
+# Environment variables substituted at container startup:
+#   SNE_HOSTNAME      — admin UI hostname  (default: seenoevil.lan)
+#   SNE_TLS_MODE      — internal | acme | off  (default: internal)
+#   SNE_ACME_EMAIL    — required when SNE_TLS_MODE=acme
+# =============================================================================
+
+{
+    # Global options
+    admin off          # disable Caddy admin API from outside the container
+    log {
+        output stdout
+        format json
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Admin UI + API
+# ---------------------------------------------------------------------------
+${SNE_HOSTNAME} {
+    # TLS — switched by SNE_TLS_MODE
+    # "internal" uses Caddy's built-in CA (self-signed, trusted automatically
+    # on the host that runs Caddy; other devices need to import the Caddy root).
+    # "acme" uses Let's Encrypt / ZeroSSL — requires a public-facing hostname.
+    # "off" serves HTTP only (development / behind existing TLS terminator).
+    tls {$SNE_TLS_EMAIL} {
+        issuer internal
+    }
+
+    # ---------------------------------------------------------------------------
+    # Reverse proxy routes
+    # ---------------------------------------------------------------------------
+
+    # Health probe used by docker healthcheck (no auth required).
+    handle /healthz {
+        respond "ok" 200
+    }
+
+    # API — everything under /v1 → FastAPI
+    handle /v1/* {
+        reverse_proxy api:8000
+    }
+
+    # Admin UI SPA — everything else → nginx-served Vite build
+    handle {
+        reverse_proxy ui:80
+    }
+}

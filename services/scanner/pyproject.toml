@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seenoevil-scanner"
+version = "0.1.0"
+description = "see-no-evil LAN device scanner"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+
+dependencies = [
+  "httpx==0.28.1",
+  "pyyaml==6.0.2",
+  "python-nmap==0.7.1",
+  "prometheus-client==0.21.1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest==8.3.4",
+]
+
+[project.scripts]
+seenoevil-scanner = "seenoevil_scanner.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

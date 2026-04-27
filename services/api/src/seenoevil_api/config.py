@@ -140,6 +140,7 @@ class ClassifiersConfig(_Base):
 
 class AllowDeny(_Base):
     domains: list[str] = Field(default_factory=list)
+    url_keywords: list[str] = Field(default_factory=list)
     youtube_channels: list[str] = Field(default_factory=list)
 
 
@@ -201,6 +202,12 @@ class ObservabilityConfig(_Base):
     audit: AuditObservabilityConfig = Field(default_factory=AuditObservabilityConfig)
 
 
+class ScannerConfig(_Base):
+    enabled: bool = False
+    cidr: str = "192.168.1.0/24"
+    interval: str = "1h"
+
+
 class AppConfig(_Base):
     pod: PodConfig = Field(default_factory=PodConfig)
     db: DBConfig = Field(default_factory=DBConfig)
@@ -210,6 +217,7 @@ class AppConfig(_Base):
     profiles: list[ProfileConfig] = Field(default_factory=list)
     devices: DevicesConfig = Field(default_factory=DevicesConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
 
     @model_validator(mode="after")
     def _check_profiles_unique(self) -> AppConfig:

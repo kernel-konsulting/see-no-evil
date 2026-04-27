@@ -134,3 +134,76 @@ def test_deny_wins_over_allow_list() -> None:
     out = decide(p, _inp(url="https://example.com/"))
     assert out.decision == "block"
     assert out.reason == "deny_domain"
+
+
+# ---------------------------------------------------------------------------
+# M2: URL keyword filter
+# ---------------------------------------------------------------------------
+
+
+def test_url_keyword_block() -> None:
+    p = _profile(deny_url_keywords=["nsfw", "adult"])
+    out = decide(p, _inp(url="https://example.com/category/Nsfw/page"))
+    assert out.decision == "block"
+    assert out.reason == "deny_keyword"
+
+
+def test_url_keyword_query_match() -> None:
+    p = _profile(deny_url_keywords=["xxx"])
+    out = decide(p, _inp(url="https://search.example/?q=xxx"))
+    assert out.decision == "block"
+    assert out.reason == "deny_keyword"
+
+
+def test_url_keyword_no_match_allows() -> None:
+    p = _profile(deny_url_keywords=["nsfw"])
+    out = decide(p, _inp(url="https://example.com/news/article"))
+    assert out.decision == "allow"
+
+
+# ---------------------------------------------------------------------------
+# M2: YouTube channel allow/deny
+# ---------------------------------------------------------------------------
+
+
+def test_youtube_deny_channel_handle() -> None:
+    p = _profile(deny_youtube_channels=["@badchannel"])
+    out = decide(p, _inp(url="https://www.youtube.com/@badchannel/videos"))
+    assert out.decision == "block"
+    assert out.reason == "deny_youtube_channel"
+
+
+def test_youtube_deny_channel_id() -> None:
+    p = _profile(deny_youtube_channels=["UCabc123"])
+    out = decide(
+        p,
+        _inp(url="https://www.youtube.com/channel/UCabc123/videos"),
+    )
+    assert out.decision == "block"
+
+
+def test_youtube_allow_list_blocks_other_channels() -> None:
+    p = _profile(allow_youtube_channels=["@kidsapproved"])
+    out = decide(p, _inp(url="https://www.youtube.com/@randomchannel"))
+    assert out.decision == "block"
+    assert out.reason == "youtube_channel_not_allowed"
+
+
+def test_youtube_allow_list_allows_listed() -> None:
+    p = _profile(allow_youtube_channels=["KidsApproved"])
+    out = decide(p, _inp(url="https://www.youtube.com/@kidsapproved/videos"))
+    assert out.decision == "allow"
+
+
+def test_youtube_watch_url_with_allow_list_blocks() -> None:
+    # /watch?v=... has no channel info → conservative block when allow-list is set.
+    p = _profile(allow_youtube_channels=["@kidsapproved"])
+    out = decide(p, _inp(url="https://www.youtube.com/watch?v=abc"))
+    assert out.decision == "block"
+    assert out.reason == "youtube_channel_not_allowed"
+
+
+def test_non_youtube_url_unaffected_by_youtube_rules() -> None:
+    p = _profile(deny_youtube_channels=["@bad"])
+    out = decide(p, _inp(url="https://example.com/@bad"))
+    assert out.decision == "allow"

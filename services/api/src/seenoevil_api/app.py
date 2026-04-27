@@ -23,7 +23,7 @@ from .config import AppConfig, ProfileConfig, load_config
 from .db import build_engine, get_db, make_session_factory
 from .migrations import upgrade_to_head
 from .models import Profile
-from .routers import audit, auth, decide, devices, health, profiles
+from .routers import audit, auth, decide, devices, health, profiles, quarantine
 
 log = logging.getLogger("seenoevil_api")
 
@@ -39,6 +39,7 @@ def _profile_to_orm(p: ProfileConfig) -> Profile:
         quota_minutes_per_day=p.quota_minutes_per_day,
         allow_domains=list(p.allow.domains),
         deny_domains=list(p.deny.domains),
+        deny_url_keywords=list(p.deny.url_keywords),
         allow_youtube_channels=list(p.allow.youtube_channels),
         deny_youtube_channels=list(p.deny.youtube_channels),
         notify_on_block=p.notify_on_block,
@@ -119,8 +120,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(health.make_router(db_dep))
     app.include_router(auth.make_router(db_dep))
     app.include_router(profiles.make_router(db_dep, require_admin))
-    app.include_router(devices.make_router(db_dep, require_admin))
+    app.include_router(devices.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(audit.make_router(db_dep))
+    app.include_router(quarantine.make_router(db_dep, require_admin))
     app.include_router(decide.make_router(db_dep, get_config_dep))
 
     @app.exception_handler(ValueError)

@@ -1,0 +1,63 @@
+# Vector configuration for see-no-evil observability profile.
+#
+# Sources:
+#   - docker logs of all containers (read via the host docker socket)
+#   - Prometheus metrics scraped from each service's /metrics endpoint
+#
+# Sinks:
+#   - rotating Parquet files in /data/logs (queryable from the API)
+#   - VictoriaMetrics for time-series metrics (when the observability profile
+#     is enabled)
+
+data_dir = "/data/vector"
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+
+[sources.docker_logs]
+type = "docker_logs"
+include_labels = ["com.docker.compose.project=seenoevil"]
+
+[sources.api_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://api:8000/metrics"]
+scrape_interval_secs = 30
+
+[sources.proxy_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://proxy:9090/metrics"]
+scrape_interval_secs = 30
+
+[sources.scanner_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://scanner:9102/metrics"]
+scrape_interval_secs = 60
+
+# ---------------------------------------------------------------------------
+# Transforms
+# ---------------------------------------------------------------------------
+
+[transforms.parsed_logs]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+.service = .container_name
+del(.label)
+'''
+
+# ---------------------------------------------------------------------------
+# Sinks
+# ---------------------------------------------------------------------------
+
+[sinks.victoriametrics]
+type = "prometheus_remote_write"
+inputs = ["api_metrics", "proxy_metrics", "scanner_metrics"]
+endpoint = "http://victoriametrics:8428/api/v1/write"
+healthcheck.enabled = true
+
+[sinks.parquet_logs]
+type = "file"
+inputs = ["parsed_logs"]
+path = "/data/logs/seenoevil-%Y-%m-%d.log"
+encoding.codec = "json"

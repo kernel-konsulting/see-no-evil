@@ -1,0 +1,165 @@
+// Package config loads and validates the proxy's slice of config.yaml.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Root mirrors the fields from config.yaml that the proxy needs.
+// Unknown fields are ignored; the full config is also read by other services.
+type Root struct {
+	Pod struct {
+		Hostname string `yaml:"hostname"`
+		DataDir  string `yaml:"data_dir"`
+	} `yaml:"pod"`
+
+	API struct {
+		// Internal address of the api service (populated by compose).
+		InternalAddr string `yaml:"internal_addr"`
+	} `yaml:"api"`
+
+	Proxy ProxyConfig `yaml:"proxy"`
+
+	Classifiers ClassifiersConfig `yaml:"classifiers"`
+}
+
+type ProxyConfig struct {
+	BindHTTP  string `yaml:"bind_http"`
+	BindHTTPS string `yaml:"bind_https"`
+	// MetricsAddr is not in the user-facing config; set via env or default.
+	MetricsAddr string `yaml:"-"`
+
+	CA struct {
+		Mode     string `yaml:"mode"`      // "auto" | "byo"
+		CertPath string `yaml:"cert_path"` // used when mode=byo
+		KeyPath  string `yaml:"key_path"`
+		DataDir  string `yaml:"-"` // injected after load
+	} `yaml:"ca"`
+
+	BypassDomains []string `yaml:"bypass_domains"`
+
+	SafeSearch struct {
+		Google            bool `yaml:"google"`
+		Bing              bool `yaml:"bing"`
+		DuckDuckGo        bool `yaml:"ddg"`
+		YouTubeRestricted bool `yaml:"youtube_restricted"`
+	} `yaml:"safesearch"`
+
+	MaxInspectBody string `yaml:"max_inspect_body"` // e.g. "10MiB"
+}
+
+// MaxInspectBytes converts the IEC size string to bytes.
+func (p ProxyConfig) MaxInspectBytes() int64 {
+	return parseSize(p.MaxInspectBody, 10<<20) // default 10 MiB
+}
+
+type ClassifiersConfig struct {
+	Image struct {
+		Addr string `yaml:"addr"` // e.g. "image-classifier:50051"
+	} `yaml:"image"`
+	Text struct {
+		Addr string `yaml:"addr"`
+	} `yaml:"text"`
+}
+
+// Load reads and parses config.yaml.  If path is empty it tries
+// CONFIG_PATH env var, then /data/config.yaml, then ./config.yaml.
+func Load(path string) (*Root, error) {
+	if path == "" {
+		path = os.Getenv("CONFIG_PATH")
+	}
+	if path == "" {
+		for _, candidate := range []string{"/data/config.yaml", "./config.yaml"} {
+			if _, err := os.Stat(candidate); err == nil {
+				path = candidate
+				break
+			}
+		}
+	}
+	if path == "" {
+		return nil, fmt.Errorf("no config file found; set CONFIG_PATH or place config.yaml in /data")
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 — intentional config file read
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+
+	var root Root
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	root.setDefaults()
+	return &root, nil
+}
+
+func (r *Root) setDefaults() {
+	if r.Proxy.BindHTTP == "" {
+		r.Proxy.BindHTTP = "0.0.0.0:8080"
+	}
+	if r.Proxy.BindHTTPS == "" {
+		r.Proxy.BindHTTPS = "0.0.0.0:8443"
+	}
+	if r.Proxy.MetricsAddr == "" {
+		r.Proxy.MetricsAddr = envOr("METRICS_ADDR", "0.0.0.0:9100")
+	}
+	if r.Proxy.CA.DataDir == "" {
+		d := r.Pod.DataDir
+		if d == "" {
+			d = "/data"
+		}
+		r.Proxy.CA.DataDir = d + "/ca"
+	}
+	if r.Classifiers.Image.Addr == "" {
+		r.Classifiers.Image.Addr = envOr("IMAGE_CLASSIFIER_ADDR", "image-classifier:50051")
+	}
+	if r.Classifiers.Text.Addr == "" {
+		r.Classifiers.Text.Addr = envOr("TEXT_CLASSIFIER_ADDR", "text-classifier:50052")
+	}
+	if r.API.InternalAddr == "" {
+		r.API.InternalAddr = envOr("API_ADDR", "api:8000")
+	}
+}
+
+// PolicyAPIURL returns the base URL for the policy/decide HTTP endpoint.
+func (r *Root) PolicyAPIURL() string {
+	addr := r.API.InternalAddr
+	if !strings.HasPrefix(addr, "http") {
+		addr = "http://" + addr
+	}
+	return addr
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// parseSize converts IEC size strings (10MiB, 2GiB) to bytes.
+func parseSize(s string, fallback int64) int64 {
+	if s == "" {
+		return fallback
+	}
+	units := map[string]int64{
+		"B": 1, "KIB": 1 << 10, "MIB": 1 << 20, "GIB": 1 << 30,
+	}
+	s = strings.TrimSpace(strings.ToUpper(s))
+	for suffix, mult := range units {
+		if strings.HasSuffix(s, suffix) {
+			n := int64(0)
+			_, err := fmt.Sscan(strings.TrimSuffix(s, suffix), &n)
+			if err != nil {
+				return fallback
+			}
+			return n * mult
+		}
+	}
+	return fallback
+}

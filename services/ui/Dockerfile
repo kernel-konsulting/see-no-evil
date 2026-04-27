@@ -1,18 +1,38 @@
 # syntax=docker/dockerfile:1.7
 # -----------------------------------------------------------------------------
-# see-no-evil — ui (M0 stub)
+# see-no-evil — ui
+#
+# Multi-stage:
+#   1. builder  — npm ci + vite build
+#   2. runtime  — nginx:alpine serves /usr/share/nginx/html
+#
+# The proxy API URL is set at build time via VITE_API_URL (defaults to /v1).
+# In production Caddy handles /v1 → api:8000 at the reverse proxy level.
 # -----------------------------------------------------------------------------
-FROM node:20-alpine
+FROM node:20-alpine AS builder
 
 WORKDIR /app
-RUN addgroup -S -g 10001 app && adduser -S -G app -u 10001 -h /app -s /sbin/nologin app
 
-COPY --chown=app:app entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Install dependencies first (layer-cached separately from source code).
+COPY package.json package-lock.json* ./
+RUN npm ci --ignore-scripts
 
-USER app
-EXPOSE 5173
+# Copy source and build.
+COPY . .
+ARG VITE_API_URL=/v1
+ENV VITE_API_URL=${VITE_API_URL}
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+# nginx config — SPA routing (all paths → index.html)
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/bin/sh", "-c", "test -f /tmp/ready"]
+    CMD wget -qO- http://localhost/healthz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]

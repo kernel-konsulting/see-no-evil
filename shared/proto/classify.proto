@@ -1,0 +1,98 @@
+// see-no-evil — classifier gRPC contracts
+//
+// Services consumed by the Go proxy data-plane to classify request/response
+// bodies.  All services live on the same Docker network; the proxy reaches them
+// at grpc://image-classifier:50051, grpc://text-classifier:50052, etc.
+
+syntax = "proto3";
+
+package seenoevil.classify.v1;
+
+option go_package = "github.com/kernel-konsulting/see-no-evil/gen/classify/v1;classifyv1";
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+// A single labelled score in [0, 1].
+message Score {
+  string label  = 1;
+  float  value  = 2;
+}
+
+// Verdict emitted after classification + threshold check.
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_ALLOW       = 1;
+  ACTION_BLOCK       = 2;
+  ACTION_WARN        = 3;  // borderline — queued for human review
+}
+
+// ---------------------------------------------------------------------------
+// ImageClassifier
+// ---------------------------------------------------------------------------
+
+message ClassifyImageRequest {
+  // Raw image bytes (JPEG, PNG, WebP, GIF first-frame).
+  bytes image_data   = 1;
+  // Opaque ID propagated to audit log (e.g. proxy request UUID).
+  string request_id  = 2;
+}
+
+message ClassifyImageResponse {
+  repeated Score scores      = 1;
+  Action         action      = 2;
+  string         reason      = 3;
+  // Time the model actually ran (excludes network), in milliseconds.
+  int64          latency_ms  = 4;
+}
+
+service ImageClassifier {
+  rpc Classify(ClassifyImageRequest) returns (ClassifyImageResponse);
+}
+
+// ---------------------------------------------------------------------------
+// TextClassifier
+// ---------------------------------------------------------------------------
+
+message ClassifyTextRequest {
+  string text        = 1;
+  string request_id  = 2;
+}
+
+message ClassifyTextResponse {
+  repeated Score scores     = 1;
+  Action         action     = 2;
+  string         reason     = 3;
+  int64          latency_ms = 4;
+}
+
+service TextClassifier {
+  rpc Classify(ClassifyTextRequest) returns (ClassifyTextResponse);
+}
+
+// ---------------------------------------------------------------------------
+// VideoSampler (streamed frames → ImageClassifier internally)
+// ---------------------------------------------------------------------------
+
+message SampleVideoRequest {
+  // Streaming video bytes (MP4, WebM, etc.).  Sent as a sequence of chunks.
+  bytes chunk        = 1;
+  string request_id  = 2;
+  // Target number of frames to sample.  0 = use server default.
+  int32 max_frames   = 3;
+}
+
+message SampleVideoResponse {
+  // Worst-case image scores across all sampled frames.
+  repeated Score worst_scores = 1;
+  Action         action       = 2;
+  string         reason       = 3;
+  // Number of frames that were actually classified.
+  int32          frames_scored = 4;
+  int64          latency_ms    = 5;
+}
+
+service VideoSampler {
+  rpc Sample(stream SampleVideoRequest) returns (SampleVideoResponse);
+}
