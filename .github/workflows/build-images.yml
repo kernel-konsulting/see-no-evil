@@ -35,10 +35,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # M0: build only — do not push. Pushing wires up in M1.
+      # Build context is the repo root so Dockerfiles can COPY ../../shared/proto/*.
       - name: Build (no push)
         uses: docker/build-push-action@v6
         with:
-          context: services/${{ matrix.service }}
+          context: .
           file: services/${{ matrix.service }}/Dockerfile
           platforms: ${{ matrix.platform }}
           push: false

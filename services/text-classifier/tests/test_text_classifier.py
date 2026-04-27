@@ -81,7 +81,6 @@ def test_classify_rpc_sfw_text(mock_session, mock_tokenizer):
 
 def test_classify_rpc_inference_error(mock_session, mock_tokenizer):
     import grpc
-
     from seenoevil_text_classifier import server
     from seenoevil_text_classifier.generated import classify_pb2
 

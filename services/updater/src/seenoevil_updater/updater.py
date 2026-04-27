@@ -56,7 +56,7 @@ HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "120"))
 
 @dataclass(frozen=True)
 class Artefact:
-    dest: str            # relative to MODELS_DIR or LISTS_DIR
+    dest: str  # relative to MODELS_DIR or LISTS_DIR
     url: str
     sha256: str
 
@@ -133,7 +133,12 @@ def _download(client: httpx.Client, artefact: Artefact, dest_dir: Path) -> None:
         if actual == artefact.sha256:
             log.info("%s already present and verified, skipping", dest.name)
             return
-        log.warning("%s checksum mismatch (expected %s got %s), re-downloading", dest.name, artefact.sha256, actual)
+        log.warning(
+            "%s checksum mismatch (expected %s got %s), re-downloading",
+            dest.name,
+            artefact.sha256,
+            actual,
+        )
 
     log.info("downloading %s → %s", artefact.url, dest)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -154,8 +159,7 @@ def _download(client: httpx.Client, artefact: Artefact, dest_dir: Path) -> None:
         if actual != artefact.sha256:
             tmp_path.unlink(missing_ok=True)
             raise RuntimeError(
-                f"checksum mismatch for {artefact.dest}: "
-                f"expected {artefact.sha256}, got {actual}"
+                f"checksum mismatch for {artefact.dest}: expected {artefact.sha256}, got {actual}"
             )
 
     shutil.move(str(tmp_path), dest)

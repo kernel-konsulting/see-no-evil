@@ -1,6 +1,13 @@
 target-version = "py312"
 line-length = 100
 
+extend-exclude = [
+  # Generated protobuf/gRPC stubs — never hand-edit and never lint.
+  "**/generated/**",
+  "**/*_pb2.py",
+  "**/*_pb2_grpc.py",
+]
+
 [lint]
 select = [
   "E",   # pycodestyle errors

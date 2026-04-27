@@ -19,7 +19,7 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.0 \
  && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
 WORKDIR /src
-COPY ../../shared/proto/classify.proto /proto/classify.proto
+COPY shared/proto/classify.proto /proto/classify.proto
 
 # Generate into gen/classify/v1/ so the import path matches go.mod.
 RUN mkdir -p gen/classify/v1 \
@@ -40,12 +40,12 @@ ENV CGO_ENABLED=0 \
 WORKDIR /src
 
 # Copy module files first for layer caching.
-COPY go.mod go.sum* ./
+COPY services/proxy/go.mod services/proxy/go.sum* ./
 RUN go mod download
 
 # Copy generated stubs + source.
 COPY --from=proto /src/gen ./gen
-COPY . .
+COPY services/proxy/ .
 
 RUN go build -trimpath -ldflags="-s -w" -o /proxy ./...
 

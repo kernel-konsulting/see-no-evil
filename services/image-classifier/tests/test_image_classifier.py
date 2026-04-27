@@ -7,7 +7,7 @@ The gRPC servicer is tested directly (no network) via unit-test-style calls.
 from __future__ import annotations
 
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -84,7 +84,6 @@ def test_classify_rpc_returns_allow(mock_session):
 
 def test_classify_rpc_bad_image_sets_grpc_error(mock_session):
     import grpc
-
     from seenoevil_image_classifier import server
     from seenoevil_image_classifier.generated import classify_pb2
 
@@ -100,7 +99,6 @@ def test_classify_rpc_bad_image_sets_grpc_error(mock_session):
 
 def test_classify_rpc_inference_error_sets_grpc_error(mock_session):
     import grpc
-
     from seenoevil_image_classifier import server
     from seenoevil_image_classifier.generated import classify_pb2
 

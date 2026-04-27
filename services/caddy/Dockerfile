@@ -13,8 +13,8 @@ FROM caddy:2-alpine
 
 RUN apk add --no-cache gettext  # provides envsubst
 
-COPY Caddyfile.template /etc/caddy/Caddyfile.template
-COPY entrypoint.sh /entrypoint.sh
+COPY services/caddy/Caddyfile.template /etc/caddy/Caddyfile.template
+COPY services/caddy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 80 443

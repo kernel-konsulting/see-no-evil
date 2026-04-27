@@ -16,11 +16,11 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY src ./src
+COPY services/scanner/pyproject.toml ./
+COPY services/scanner/src ./src
 RUN pip install --no-cache-dir -e .
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY services/scanner/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Container runs as root so nmap can use raw sockets. The scanner process

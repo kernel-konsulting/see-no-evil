@@ -39,7 +39,9 @@ log = logging.getLogger("image-classifier")
 # Config from environment
 # ---------------------------------------------------------------------------
 
-MODEL_PATH = Path(os.environ.get("IMAGE_CLASSIFIER_MODEL_PATH", "/data/models/image_classifier.onnx"))
+MODEL_PATH = Path(
+    os.environ.get("IMAGE_CLASSIFIER_MODEL_PATH", "/data/models/image_classifier.onnx")
+)
 DEVICE = os.environ.get("IMAGE_CLASSIFIER_DEVICE", "cpu").lower()
 PORT = int(os.environ.get("IMAGE_CLASSIFIER_PORT", "50051"))
 WORKERS = int(os.environ.get("IMAGE_CLASSIFIER_WORKERS", "4"))
@@ -110,11 +112,12 @@ _INPUT_SIZE = (224, 224)
 def _preprocess(image_bytes: bytes) -> np.ndarray:
     """Convert raw image bytes → float32 NCHW tensor [1, 3, 224, 224]."""
     import io
+
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize(_INPUT_SIZE, Image.BILINEAR)
-    arr = np.array(img, dtype=np.float32) / 255.0          # HWC [0,1]
-    arr = arr.transpose(2, 0, 1)                            # CHW
-    return arr[np.newaxis, ...]                             # NCHW
+    arr = np.array(img, dtype=np.float32) / 255.0  # HWC [0,1]
+    arr = arr.transpose(2, 0, 1)  # CHW
+    return arr[np.newaxis, ...]  # NCHW
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +175,10 @@ class ImageClassifierServicer(classify_pb2_grpc.ImageClassifierServicer):  # typ
         action, reason = _action_from_scores(scores_map)
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
-        proto_scores = [
-            classify_pb2.Score(label=k, value=v) for k, v in scores_map.items()
-        ]
+        proto_scores = [classify_pb2.Score(label=k, value=v) for k, v in scores_map.items()]
 
         _classify_total.labels(action=classify_pb2.Action.Name(action)).inc()
-        _classify_latency.observe((time.perf_counter() - t0))
+        _classify_latency.observe(time.perf_counter() - t0)
 
         return classify_pb2.ClassifyImageResponse(
             scores=proto_scores,
@@ -190,6 +191,7 @@ class ImageClassifierServicer(classify_pb2_grpc.ImageClassifierServicer):  # typ
 # ---------------------------------------------------------------------------
 # Server entrypoint
 # ---------------------------------------------------------------------------
+
 
 def serve() -> None:
     logging.basicConfig(

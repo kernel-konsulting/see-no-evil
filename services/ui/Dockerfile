@@ -14,11 +14,11 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Install dependencies first (layer-cached separately from source code).
-COPY package.json package-lock.json* ./
+COPY services/ui/package.json services/ui/package-lock.json* ./
 RUN npm ci --ignore-scripts
 
 # Copy source and build.
-COPY . .
+COPY services/ui/ .
 ARG VITE_API_URL=/v1
 ENV VITE_API_URL=${VITE_API_URL}
 RUN npm run build
@@ -27,7 +27,7 @@ RUN npm run build
 FROM nginx:1.27-alpine AS runtime
 
 # nginx config — SPA routing (all paths → index.html)
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY services/ui/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80

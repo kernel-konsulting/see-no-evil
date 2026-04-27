@@ -20,8 +20,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential libffi-dev libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
-COPY src ./src
+COPY services/api/pyproject.toml ./
+COPY services/api/src ./src
 
 # Install into an isolated prefix that we'll copy verbatim into the runtime image.
 RUN pip install --prefix=/install ".[postgres]"
