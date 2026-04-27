@@ -17,7 +17,7 @@ _VALID_STATUSES = {"pending", "allowed", "denied"}
 def make_router(get_session_dep, require_admin) -> APIRouter:
     r = APIRouter(prefix="/v1/quarantine", tags=["quarantine"])
 
-    @r.get("", response_model=list[QuarantineOut])
+    @r.get("", response_model=list[QuarantineOut], dependencies=[Depends(require_admin)])
     def list_quarantine(
         session: Session = Depends(get_session_dep),
         status_: str = Query(default="pending", alias="status"),
@@ -30,7 +30,7 @@ def make_router(get_session_dep, require_admin) -> APIRouter:
             stmt = stmt.where(QuarantineItem.status == status_)
         return list(session.scalars(stmt))
 
-    @r.get("/{item_id}", response_model=QuarantineOut)
+    @r.get("/{item_id}", response_model=QuarantineOut, dependencies=[Depends(require_admin)])
     def get_quarantine(item_id: int, session: Session = Depends(get_session_dep)) -> QuarantineItem:
         obj = session.get(QuarantineItem, item_id)
         if obj is None:

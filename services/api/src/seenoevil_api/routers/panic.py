@@ -2,7 +2,7 @@
 
 Three operations:
 
-* ``GET    /v1/admin/panic`` — current state (anyone authenticated).
+* ``GET    /v1/admin/panic`` — current state (admin).
 * ``POST   /v1/admin/panic`` — enable for ``duration_minutes`` (admin).
 * ``DELETE /v1/admin/panic`` — disable now (admin).
 
@@ -51,7 +51,7 @@ def _audit(session: Session, *, action: str, who: str | None, reason: str) -> No
 def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/admin/panic", tags=["panic"])
 
-    @r.get("", response_model=PanicStatus)
+    @r.get("", response_model=PanicStatus, dependencies=[Depends(require_admin)])
     def get_panic(session: Session = Depends(get_session_dep)) -> PanicStatus:
         return _to_status(panic.get_state(session))
 

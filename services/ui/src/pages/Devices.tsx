@@ -170,7 +170,7 @@ export default function Devices() {
             <div className="space-y-1">
               <Label>Name</Label>
               <Input
-                value={editing.name}
+                value={editing.name ?? ""}
                 onChange={(e) =>
                   setEditing((d) => d && { ...d, name: e.target.value })
                 }
@@ -183,7 +183,7 @@ export default function Devices() {
                 value={editing.profile_id ?? ""}
                 onChange={(e) =>
                   setEditing(
-                    (d) => d && { ...d, profile_id: e.target.value || null },
+                    (d) => d && { ...d, profile_id: Number(e.target.value) },
                   )
                 }
               >

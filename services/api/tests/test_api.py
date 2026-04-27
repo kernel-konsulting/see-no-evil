@@ -13,14 +13,29 @@ def test_healthz_ready_metrics(client: TestClient) -> None:
     assert b"python_info" in metrics.content
 
 
-def test_seeded_profiles_are_visible(client: TestClient) -> None:
-    r = client.get("/v1/profiles")
+def test_seeded_profiles_are_visible(admin_client: TestClient) -> None:
+    r = admin_client.get("/v1/profiles")
     assert r.status_code == 200
     names = {p["name"] for p in r.json()}
     assert {"kids", "guests"} <= names
 
 
-def test_profile_crud_requires_admin(client: TestClient) -> None:
+def test_control_plane_reads_require_admin(client: TestClient) -> None:
+    protected_paths = (
+        "/v1/profiles",
+        "/v1/profiles/1",
+        "/v1/devices",
+        "/v1/devices/1",
+        "/v1/audit",
+        "/v1/quarantine",
+        "/v1/quarantine/1",
+    )
+    for path in protected_paths:
+        r = client.get(path)
+        assert r.status_code == 401
+
+
+def test_control_plane_writes_require_admin(client: TestClient) -> None:
     r = client.post("/v1/profiles", json={"name": "blocked"})
     assert r.status_code == 401
 
@@ -257,11 +272,9 @@ def test_quarantine_admin_only(client: TestClient) -> None:
             "classifier_scores": {"porn": 0.99},
         },
     )
-    items = client.get("/v1/quarantine").json()
-    assert len(items) == 1
-    item_id = items[0]["id"]
-    r = client.post(f"/v1/quarantine/{item_id}/allow")
-    assert r.status_code == 401
+    assert client.get("/v1/quarantine").status_code == 401
+    assert client.get("/v1/quarantine/1").status_code == 401
+    assert client.post("/v1/quarantine/1/allow").status_code == 401
 
 
 def test_quarantine_delete(admin_client: TestClient) -> None:

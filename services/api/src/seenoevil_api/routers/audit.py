@@ -12,10 +12,10 @@ from ..models import AuditDecision
 from ..schemas import AuditOut
 
 
-def make_router(get_session_dep) -> APIRouter:
+def make_router(get_session_dep, require_admin) -> APIRouter:
     r = APIRouter(prefix="/v1/audit", tags=["audit"])
 
-    @r.get("", response_model=list[AuditOut])
+    @r.get("", response_model=list[AuditOut], dependencies=[Depends(require_admin)])
     def list_audit(
         session: Session = Depends(get_session_dep),
         device_id: int | None = Query(default=None),

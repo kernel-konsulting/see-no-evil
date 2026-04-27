@@ -1,6 +1,13 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { LayoutDashboard, Monitor, Shield, ScrollText, ShieldAlert, LogOut } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import {
+  LayoutDashboard,
+  Monitor,
+  Shield,
+  ScrollText,
+  ShieldAlert,
+  LogOut,
+} from "lucide-react";
+import { useAuth } from "@/lib/use-auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -20,7 +27,9 @@ export default function Layout() {
       {/* Sidebar */}
       <aside className="w-56 flex-shrink-0 border-r bg-muted/40 flex flex-col">
         <div className="px-6 py-5 border-b">
-          <span className="font-semibold text-lg tracking-tight">see-no-evil</span>
+          <span className="font-semibold text-lg tracking-tight">
+            see-no-evil
+          </span>
         </div>
         <nav className="flex-1 py-4 px-3 space-y-1">
           {NAV_ITEMS.map(({ to, label, icon: Icon }) => (

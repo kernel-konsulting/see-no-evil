@@ -24,11 +24,11 @@ from ..schemas import (
 def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/devices", tags=["devices"])
 
-    @r.get("", response_model=list[DeviceOut])
+    @r.get("", response_model=list[DeviceOut], dependencies=[Depends(require_admin)])
     def list_devices(session: Session = Depends(get_session_dep)) -> list[Device]:
         return list(session.scalars(select(Device).order_by(Device.id)))
 
-    @r.get("/{device_id}", response_model=DeviceOut)
+    @r.get("/{device_id}", response_model=DeviceOut, dependencies=[Depends(require_admin)])
     def get_device(device_id: int, session: Session = Depends(get_session_dep)) -> Device:
         obj = session.get(Device, device_id)
         if obj is None:
