@@ -8,9 +8,12 @@ sampling to filter NSFW (and other configured) content on a network you control.
 ships as a set of containers you can run on Podman, Docker Compose, or Kubernetes —
 on a Raspberry Pi 5, an old NUC, dedicated hardware, or a self-managed cloud VM.
 
-**Status:** very early. This is the **M0 scaffolding** milestone — repository
-layout, license, configuration shape, architecture docs, and empty service
-skeletons. Nothing is functional yet.
+**Status:** v0.1 release candidate. Every milestone (M0–M9) is implemented:
+DNS + MITM proxy + image/text/video classifiers, control-plane API + admin
+UI, install wizard, scanner, OIDC, backup/restore, Litestream, full
+observability with Grafana dashboards and vmalert. The pod is ready for
+home and small-org pilot deployments. See [PLAN.md](PLAN.md) for the per-
+milestone status table.
 
 ---
 
@@ -50,17 +53,31 @@ skeletons. Nothing is functional yet.
 See [`docs/architecture.md`](docs/architecture.md) for the full picture, including
 the **two completely separate TLS surfaces** (admin UI cert vs. MITM CA).
 
-## Quick start (placeholder)
+## Quick start
 
 ```bash
-# Not functional yet — this is what the M1 quickstart will look like.
 git clone https://github.com/kernel-konsulting/see-no-evil.git
 cd see-no-evil
 cp config.example.yaml config.yaml
-# edit config.yaml — at minimum set pod.hostname and auth.builtin.admin_email
+# edit config.yaml — at minimum set pod.hostname
+
+# First-run wizard: seeds the admin account, generates the MITM CA, prompts
+# for a hostname and TLS mode.
+docker compose --profile setup run --rm sne-setup
+
+# Bring up the full stack:
 docker compose --profile core up -d
-# then visit https://seenoevil.lan and follow the install wizard
+
+# Optional add-ons:
+docker compose --profile core --profile observability up -d   # Grafana + alerts
+docker compose --profile core --profile vpn-tailscale up -d   # remote access
+docker compose --profile core --profile backup up -d          # local snapshots
+
+# Then visit https://seenoevil.lan and sign in with the admin you just created.
 ```
+
+See [docs/backup.md](docs/backup.md), [docs/oidc.md](docs/oidc.md), and
+[docs/vpn.md](docs/vpn.md) for the optional profiles.
 
 Hardware sizing notes are in [`docs/hardware-sizing.md`](docs/hardware-sizing.md).
 The threat model and what this tool can and **cannot** protect against is in
@@ -88,7 +105,7 @@ source of truth for every knob. Copy it to `config.yaml` and edit. Highlights:
 ├── config.example.yaml         the one config file users edit
 ├── docs/                       architecture, threat model, hardware sizing
 ├── deploy/compose/             docker-compose profiles (core, gpu, scanner, …)
-├── services/                   one directory per container (Dockerfile stubs only at M0)
+├── services/                   one directory per container
 │   ├── api/                    FastAPI control plane + DB
 │   ├── ui/                     React admin UI
 │   ├── proxy/                  Go MITM data-plane

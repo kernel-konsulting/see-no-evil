@@ -86,6 +86,16 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   sidecar that streams `policy.db` to S3-compatible storage. Wired up via
   the `litestream` compose profile + `services/api/litestream.yml`.
 
+**M9 additions:**
+
+- `POST /v1/alerts/webhook` — receives vmalert payloads and fans them out
+  through the same `notifications:` config (ntfy + webhook) used for block
+  events. Severity / alertname / summary land in the notification body.
+- Observability profile (Vector + VictoriaMetrics + vmalert + Grafana +
+  cAdvisor) ships three dashboards (overview / classifiers / host) and
+  three alert groups (availability / quality / backup). See
+  [services/observability/README.md](../observability/README.md).
+
 **Deferred to follow-up M1 PRs:**
 
 - OPA / rego integration (the in-tree policy engine has the same interface,
