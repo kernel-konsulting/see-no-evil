@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import notifications, panic
 from ..config import AppConfig
 from ..models import AuditDecision, Device, Profile, QuarantineItem, Quota
 from ..policy import DecisionInput, ProfileView, decide, now_parts
@@ -71,6 +72,7 @@ def make_router(get_session_dep, get_config) -> APIRouter:
     @r.post("/decide", response_model=DecideResponse)
     def post_decide(
         body: DecideRequest,
+        background: BackgroundTasks,
         session: Session = Depends(get_session_dep),
         config: AppConfig = Depends(get_config),
     ) -> DecideResponse:
@@ -85,6 +87,7 @@ def make_router(get_session_dep, get_config) -> APIRouter:
 
         now = datetime.now(UTC)
         dow, t, today = now_parts(now)
+        panic_state = panic.get_state(session)
         decision = decide(
             _profile_view(profile),
             DecisionInput(
@@ -95,6 +98,7 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                 now_time=t,
                 today=today,
                 minutes_used_today=_minutes_used_today(session, device, today),
+                panic_relax=panic_state.active,
             ),
             config=config,
         )
@@ -126,6 +130,21 @@ def make_router(get_session_dep, get_config) -> APIRouter:
             )
 
         session.commit()
+
+        if (
+            decision.decision == "block"
+            and bool(getattr(profile, "notify_on_block", False))
+            and decision.reason != "panic_relax"
+        ):
+            background.add_task(
+                notifications.send_block,
+                config.notifications,
+                profile=profile.name,
+                device_mac=device.mac if device else body.device_mac,
+                url=body.url,
+                reason=decision.reason,
+                classifier_scores=dict(body.classifier_scores),
+            )
 
         return DecideResponse(
             decision=decision.decision,
