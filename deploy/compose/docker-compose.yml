@@ -413,6 +413,44 @@ services:
       victoriametrics:
         condition: service_healthy
 
+  vmalert:
+    profiles: [observability]
+    image: victoriametrics/vmalert:stable
+    restart: unless-stopped
+    networks: [internal]
+    command:
+      - "--datasource.url=http://victoriametrics:8428"
+      - "--remoteWrite.url=http://victoriametrics:8428"
+      - "--notifier.url=http://api:8000/v1/alerts/webhook"
+      - "--rule=/etc/vmalert/alerts.yml"
+      - "--evaluationInterval=30s"
+    volumes:
+      - ../../services/observability/alerts.yml:/etc/vmalert/alerts.yml:ro
+    depends_on:
+      victoriametrics:
+        condition: service_healthy
+
+  cadvisor:
+    profiles: [observability]
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    networks: [internal]
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
 # ---------------------------------------------------------------------------
 # Secrets (file-based; create them under deploy/compose/secrets/)
 # ---------------------------------------------------------------------------

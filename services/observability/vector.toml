@@ -34,6 +34,31 @@ type = "prometheus_scrape"
 endpoints = ["http://scanner:9102/metrics"]
 scrape_interval_secs = 60
 
+[sources.image_classifier_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://image-classifier:9101/metrics"]
+scrape_interval_secs = 30
+
+[sources.text_classifier_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://text-classifier:9102/metrics"]
+scrape_interval_secs = 30
+
+[sources.video_sampler_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://video-sampler:9103/metrics"]
+scrape_interval_secs = 30
+
+[sources.dns_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://dns:4000/metrics"]
+scrape_interval_secs = 60
+
+[sources.cadvisor_metrics]
+type = "prometheus_scrape"
+endpoints = ["http://cadvisor:8080/metrics"]
+scrape_interval_secs = 30
+
 # ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
@@ -52,7 +77,16 @@ del(.label)
 
 [sinks.victoriametrics]
 type = "prometheus_remote_write"
-inputs = ["api_metrics", "proxy_metrics", "scanner_metrics"]
+inputs = [
+  "api_metrics",
+  "proxy_metrics",
+  "scanner_metrics",
+  "image_classifier_metrics",
+  "text_classifier_metrics",
+  "video_sampler_metrics",
+  "dns_metrics",
+  "cadvisor_metrics",
+]
 endpoint = "http://victoriametrics:8428/api/v1/write"
 healthcheck.enabled = true
 
