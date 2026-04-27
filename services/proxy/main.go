@@ -73,6 +73,7 @@ func main() {
 	classifierClients, err := classifier.NewClientsFromAddrs(
 		cfg.Classifiers.Image.Addr,
 		cfg.Classifiers.Text.Addr,
+		cfg.Classifiers.Video.Addr,
 	)
 	if err != nil {
 		slog.Error("failed to dial classifier services", "err", err)

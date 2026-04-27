@@ -80,6 +80,9 @@ type ClassifiersConfig struct {
 	Text struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"text"`
+	Video struct {
+		Addr string `yaml:"addr"` // empty disables video sampling
+	} `yaml:"video"`
 }
 
 // Load reads and parses config.yaml.  If path is empty it tries
@@ -136,6 +139,9 @@ func (r *Root) setDefaults() {
 	}
 	if r.Classifiers.Text.Addr == "" {
 		r.Classifiers.Text.Addr = envOr("TEXT_CLASSIFIER_ADDR", "text-classifier:50052")
+	}
+	if r.Classifiers.Video.Addr == "" {
+		r.Classifiers.Video.Addr = envOr("VIDEO_SAMPLER_ADDR", "video-sampler:50053")
 	}
 	if r.API.InternalAddr == "" {
 		r.API.InternalAddr = envOr("API_ADDR", "api:8000")

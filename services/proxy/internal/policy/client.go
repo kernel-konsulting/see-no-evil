@@ -32,6 +32,9 @@ type DecideRequest struct {
 	DeviceMAC        string             `json:"device_mac,omitempty"`
 	ContentType      string             `json:"content_type,omitempty"`
 	ClassifierScores map[string]float32 `json:"classifier_scores,omitempty"`
+	// ThumbnailB64 is an optional blurred preview the API persists with the
+	// quarantine entry when the decision is "block".
+	ThumbnailB64 string `json:"thumbnail_b64,omitempty"`
 }
 
 // DecideResponse mirrors the API's DecideResponse schema.

@@ -17,12 +17,14 @@ import (
 type Clients struct {
 	Image classifyv1.ImageClassifierClient
 	Text  classifyv1.TextClassifierClient
+	Video classifyv1.VideoSamplerClient
 
 	conns []*grpc.ClientConn
 }
 
 // NewClientsFromAddrs dials the classifier gRPC services at the given addresses.
-func NewClientsFromAddrs(imageAddr, textAddr string) (*Clients, error) {
+// videoAddr may be empty to skip video classification entirely.
+func NewClientsFromAddrs(imageAddr, textAddr, videoAddr string) (*Clients, error) {
 	imgConn, err := dial(imageAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial image-classifier at %s: %w", imageAddr, err)
@@ -32,11 +34,22 @@ func NewClientsFromAddrs(imageAddr, textAddr string) (*Clients, error) {
 		imgConn.Close()
 		return nil, fmt.Errorf("dial text-classifier at %s: %w", textAddr, err)
 	}
-	return &Clients{
+	c := &Clients{
 		Image: classifyv1.NewImageClassifierClient(imgConn),
 		Text:  classifyv1.NewTextClassifierClient(txtConn),
 		conns: []*grpc.ClientConn{imgConn, txtConn},
-	}, nil
+	}
+	if videoAddr != "" {
+		vidConn, verr := dial(videoAddr)
+		if verr != nil {
+			imgConn.Close()
+			txtConn.Close()
+			return nil, fmt.Errorf("dial video-sampler at %s: %w", videoAddr, verr)
+		}
+		c.Video = classifyv1.NewVideoSamplerClient(vidConn)
+		c.conns = append(c.conns, vidConn)
+	}
+	return c, nil
 }
 
 func dial(addr string) (*grpc.ClientConn, error) {
@@ -111,5 +124,57 @@ func (c *Clients) ClassifyText(ctx context.Context, text string, requestID strin
 		Action:    resp.Action,
 		Reason:    resp.Reason,
 		LatencyMs: resp.LatencyMs,
+	}, nil
+}
+
+// SampleVideoResult is a simplified result from the video sampler.
+type SampleVideoResult struct {
+	Scores       map[string]float32
+	Action       classifyv1.Action
+	Reason       string
+	FramesScored int32
+	LatencyMs    int64
+}
+
+// SampleVideo streams videoData to the video-sampler service in fixed-size
+// chunks and returns the worst-frame verdict. maxFrames=0 uses the server
+// default. Returns nil result if the video sampler client is not configured.
+func (c *Clients) SampleVideo(ctx context.Context, videoData []byte, maxFrames int32, requestID string) (*SampleVideoResult, error) {
+	if c.Video == nil {
+		return nil, nil
+	}
+	stream, err := c.Video.Sample(ctx)
+	if err != nil {
+		return nil, err
+	}
+	const chunkSize = 256 * 1024
+	for offset := 0; offset < len(videoData); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(videoData) {
+			end = len(videoData)
+		}
+		msg := &classifyv1.SampleVideoRequest{Chunk: videoData[offset:end]}
+		if offset == 0 {
+			msg.RequestId = requestID
+			msg.MaxFrames = maxFrames
+		}
+		if err := stream.Send(msg); err != nil {
+			return nil, err
+		}
+	}
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return nil, err
+	}
+	scores := make(map[string]float32, len(resp.WorstScores))
+	for _, s := range resp.WorstScores {
+		scores[s.Label] = s.Value
+	}
+	return &SampleVideoResult{
+		Scores:       scores,
+		Action:       resp.Action,
+		Reason:       resp.Reason,
+		FramesScored: resp.FramesScored,
+		LatencyMs:    resp.LatencyMs,
 	}, nil
 }

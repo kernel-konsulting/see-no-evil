@@ -202,9 +202,14 @@ classifiers:
       threat:   0.80
 
   video:
-    # Sample N evenly-spaced frames per video; if any frame trips the image
+    # Optional gRPC address of the video-sampler service. Empty disables video
+    # inspection in the proxy. Equivalent env var: VIDEO_SAMPLER_ADDR.
+    addr: video-sampler:50053
+    # Sample N evenly-spaced keyframes per video; if any frame trips the image
     # classifier, the whole response is dropped.
     sample_frames: 8
+    # Larger videos pass through unscanned (fail-open) to avoid stalling the
+    # proxy on legitimate large uploads.
     max_video_size: 50MiB
 
 
