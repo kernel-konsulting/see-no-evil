@@ -29,6 +29,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/ca"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/classifier"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/preview"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/safesearch"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/textextract"
 )
@@ -255,7 +256,29 @@ func (h *Handler) decide(
 				scores["image:"+k] = v
 			}
 			if result.Action.String() == "ACTION_BLOCK" {
-				_ = h.auditDecide(ctx, r, ct, scores, "block")
+				thumb, _ := preview.Image(respBody)
+				_ = h.auditDecide(ctx, r, ct, scores, "block", thumb)
+				return "block", nil
+			}
+		}
+	}
+
+	// Video sampling: stream the buffered video body to the video-sampler
+	// service which extracts evenly-spaced frames and classifies each.
+	if isVideo(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil && h.cfg.Classifiers.Video != nil {
+		result, err := h.cfg.Classifiers.SampleVideo(ctx, respBody, 0, r.Header.Get("X-Request-Id"))
+		if err != nil {
+			slog.Warn("video sampler error", "err", err)
+			classifierErrors.WithLabelValues("video").Inc()
+		} else if result != nil {
+			for k, v := range result.Scores {
+				scores["video:"+k] = v
+			}
+			if result.Action.String() == "ACTION_BLOCK" {
+				// We don't have a frame thumbnail returned by the sampler today;
+				// the quarantine UI will show the placeholder. (Returning a frame
+				// in the proto is tracked for a future iteration.)
+				_ = h.auditDecide(ctx, r, ct, scores, "block", "")
 				return "block", nil
 			}
 		}
@@ -270,7 +293,7 @@ func (h *Handler) decide(
 			scores["text:"+k] = v
 		}
 		if action == "block" {
-			_ = h.auditDecide(ctx, r, ct, scores, "block")
+			_ = h.auditDecide(ctx, r, ct, scores, "block", "")
 			return "block", nil
 		}
 		replacementBody = replaced
@@ -290,7 +313,7 @@ func (h *Handler) decide(
 			// Fail-open on policy API errors (classifiers already ran).
 			return "allow", replacementBody
 		}
-		_ = h.auditDecide(ctx, r, ct, scores, result.Decision)
+		_ = h.auditDecide(ctx, r, ct, scores, result.Decision, "")
 		if result.Decision == "block" {
 			return "block", nil
 		}
@@ -381,13 +404,14 @@ func (h *Handler) inspectText(
 	return "block", maxScores, nil
 }
 
-func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, scores map[string]float32, decision string) error {
+func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, scores map[string]float32, decision string, thumbnail string) error {
 	// Best-effort — ignore errors.
 	_, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
 		URL:              r.URL.String(),
 		DeviceMAC:        r.Header.Get("X-Device-Mac"),
 		ContentType:      ct,
 		ClassifierScores: scores,
+		ThumbnailB64:     thumbnail,
 	})
 	return err
 }
@@ -478,11 +502,15 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 // ---------------------------------------------------------------------------
 
 func shouldInspect(ct string) bool {
-	return isImage(ct) || textextract.IsSupported(ct)
+	return isImage(ct) || isVideo(ct) || textextract.IsSupported(ct)
 }
 
 func isImage(ct string) bool {
 	return strings.HasPrefix(ct, "image/")
+}
+
+func isVideo(ct string) bool {
+	return strings.HasPrefix(ct, "video/")
 }
 
 // ---------------------------------------------------------------------------
