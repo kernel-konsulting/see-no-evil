@@ -68,7 +68,7 @@ repos:
   # Go — golangci-lint (comprehensive; run in CI and on manual stage locally)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/golangci/golangci-lint
-    rev: v1.64.8
+    rev: v2.11.4
     hooks:
       - id: golangci-lint
         files: ^services/proxy/
