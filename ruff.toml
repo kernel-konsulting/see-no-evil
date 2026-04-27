@@ -11,10 +11,15 @@ select = [
   "UP",  # pyupgrade
   "SIM", # flake8-simplify
 ]
-ignore = []
+ignore = [
+  # FastAPI's `Depends(...)` / `Query(...)` / `Cookie(...)` defaults are the
+  # idiomatic way to declare dependencies; B008 fires on every endpoint.
+  "B008",
+]
 
 [lint.per-file-ignores]
 "**/migrations/*" = ["E501"]
+"**/alembic/versions/*" = ["E501"]
 
 [format]
 quote-style = "double"
