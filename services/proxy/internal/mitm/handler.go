@@ -30,6 +30,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/classifier"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/safesearch"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/textextract"
 )
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,14 @@ type Config struct {
 	MaxInspectBytes int64
 	Classifiers     *classifier.Clients
 	Policy          *policy.Client
+	TextInspection  TextInspectionCfg
+}
+
+// TextInspectionCfg controls how the text classifier verdict is applied.
+type TextInspectionCfg struct {
+	Mode          string // "off" | "block" | "strip" (default "block")
+	NSFWThreshold float32
+	Redaction     string
 }
 
 // SafeSearchCfg mirrors proxy.safesearch from config.yaml.
@@ -197,8 +206,9 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 		respBodySnap, resp.Body = peekBody(resp.Body, h.cfg.MaxInspectBytes)
 	}
 
-	// Classify and decide.
-	decision := h.decide(r.Context(), r, resp, reqBodySnap, respBodySnap)
+	// Classify and decide. May return a replacement body when text-strip mode
+	// is enabled and the classifier flagged some segments.
+	decision, replacementBody := h.decide(r.Context(), r, resp, reqBodySnap, respBodySnap)
 	requestsTotal.WithLabelValues(decision).Inc()
 	requestDuration.WithLabelValues(decision).Observe(time.Since(t0).Seconds())
 
@@ -209,6 +219,13 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Copy the response to the client.
 	copyHeaders(w.Header(), resp.Header)
+	if replacementBody != nil {
+		// We rewrote the body — original Content-Length is now stale.
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(replacementBody)))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(replacementBody)
+		return
+	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
@@ -222,9 +239,10 @@ func (h *Handler) decide(
 	r *http.Request,
 	resp *http.Response,
 	reqBody, respBody []byte,
-) string {
+) (string, []byte) {
 	ct := resp.Header.Get("Content-Type")
 	scores := make(map[string]float32)
+	var replacementBody []byte
 
 	// Image classification.
 	if isImage(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
@@ -238,30 +256,24 @@ func (h *Handler) decide(
 			}
 			if result.Action.String() == "ACTION_BLOCK" {
 				_ = h.auditDecide(ctx, r, ct, scores, "block")
-				return "block"
+				return "block", nil
 			}
 		}
 	}
 
-	// Text classification (response body).
-	if isText(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
-		text := string(respBody)
-		if len(text) > 4096 {
-			text = text[:4096]
+	// Text classification (response body) using extracted natural-language
+	// segments only — feeding raw HTML/JSON to the classifier produces
+	// constant false positives on markup tokens.
+	if h.textMode() != "off" && textextract.IsSupported(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
+		action, segScores, replaced := h.inspectText(ctx, r, ct, respBody)
+		for k, v := range segScores {
+			scores["text:"+k] = v
 		}
-		result, err := h.cfg.Classifiers.ClassifyText(ctx, text, r.Header.Get("X-Request-Id"))
-		if err != nil {
-			slog.Warn("text classifier error", "err", err)
-			classifierErrors.WithLabelValues("text").Inc()
-		} else {
-			for k, v := range result.Scores {
-				scores["text:"+k] = v
-			}
-			if result.Action.String() == "ACTION_BLOCK" {
-				_ = h.auditDecide(ctx, r, ct, scores, "block")
-				return "block"
-			}
+		if action == "block" {
+			_ = h.auditDecide(ctx, r, ct, scores, "block")
+			return "block", nil
 		}
+		replacementBody = replaced
 	}
 
 	// Policy API for domain/schedule/quota checks.
@@ -276,13 +288,97 @@ func (h *Handler) decide(
 		if err != nil {
 			slog.Warn("policy API error", "err", err)
 			// Fail-open on policy API errors (classifiers already ran).
-			return "allow"
+			return "allow", replacementBody
 		}
 		_ = h.auditDecide(ctx, r, ct, scores, result.Decision)
-		return result.Decision
+		if result.Decision == "block" {
+			return "block", nil
+		}
+		return result.Decision, replacementBody
 	}
 
-	return "allow"
+	return "allow", replacementBody
+}
+
+// textMode returns the configured text-inspection mode, defaulting to "block".
+func (h *Handler) textMode() string {
+	m := strings.ToLower(strings.TrimSpace(h.cfg.TextInspection.Mode))
+	switch m {
+	case "off", "strip", "block":
+		return m
+	default:
+		return "block"
+	}
+}
+
+func (h *Handler) textThreshold() float32 {
+	if h.cfg.TextInspection.NSFWThreshold > 0 {
+		return h.cfg.TextInspection.NSFWThreshold
+	}
+	return 0.5
+}
+
+// inspectText runs the text classifier over the natural-language segments of
+// body. Returns:
+//   - action: "block" (mode=block and a flagged segment exists),
+//     "allow" otherwise.
+//   - aggregated max scores per label.
+//   - replacement body when running in strip mode and at least one segment
+//     was redacted.
+func (h *Handler) inspectText(
+	ctx context.Context,
+	r *http.Request,
+	contentType string,
+	body []byte,
+) (string, map[string]float32, []byte) {
+	segments := textextract.Extract(contentType, body)
+	if len(segments) == 0 {
+		return "allow", nil, nil
+	}
+
+	threshold := h.textThreshold()
+	maxScores := map[string]float32{}
+	flagged := map[string]bool{} // segment text → true when over threshold
+	requestID := r.Header.Get("X-Request-Id")
+
+	for _, seg := range segments {
+		res, err := h.cfg.Classifiers.ClassifyText(ctx, seg.Text, requestID)
+		if err != nil {
+			slog.Warn("text classifier error", "err", err, "path", seg.Path)
+			classifierErrors.WithLabelValues("text").Inc()
+			continue
+		}
+		for k, v := range res.Scores {
+			if v > maxScores[k] {
+				maxScores[k] = v
+			}
+		}
+		if res.Action.String() == "ACTION_BLOCK" || res.Scores["nsfw"] >= threshold {
+			flagged[seg.Text] = true
+		}
+	}
+
+	if len(flagged) == 0 {
+		return "allow", maxScores, nil
+	}
+
+	if h.textMode() == "strip" {
+		replacement := h.cfg.TextInspection.Redaction
+		if replacement == "" {
+			replacement = "[content removed by see-no-evil]"
+		}
+		newBody, changed := textextract.Strip(contentType, body, func(s string) bool {
+			return flagged[s]
+		}, replacement)
+		if changed {
+			return "allow", maxScores, newBody
+		}
+		// Fall through to allow even if rewriting failed; we already logged.
+		return "allow", maxScores, nil
+	}
+
+	// mode == "block"
+	return "block", maxScores, nil
 }
 
 func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, scores map[string]float32, decision string) error {
@@ -382,15 +478,11 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 // ---------------------------------------------------------------------------
 
 func shouldInspect(ct string) bool {
-	return isImage(ct) || isText(ct)
+	return isImage(ct) || textextract.IsSupported(ct)
 }
 
 func isImage(ct string) bool {
 	return strings.HasPrefix(ct, "image/")
-}
-
-func isText(ct string) bool {
-	return strings.HasPrefix(ct, "text/") || ct == "application/json"
 }
 
 // ---------------------------------------------------------------------------

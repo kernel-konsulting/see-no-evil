@@ -50,6 +50,22 @@ type ProxyConfig struct {
 	} `yaml:"safesearch"`
 
 	MaxInspectBody string `yaml:"max_inspect_body"` // e.g. "10MiB"
+
+	TextInspection TextInspectionConfig `yaml:"text_inspection"`
+}
+
+// TextInspectionConfig controls how the proxy reacts when the text classifier
+// flags response content.
+//
+// Modes:
+//   - "off":   skip text classification entirely.
+//   - "block": block the whole page (legacy default).
+//   - "strip": rewrite the body, replacing flagged paragraphs with a redaction
+//     marker, but still serve it to the client.
+type TextInspectionConfig struct {
+	Mode          string  `yaml:"mode"`           // off | block | strip
+	NSFWThreshold float32 `yaml:"nsfw_threshold"` // default 0.5
+	Redaction     string  `yaml:"redaction"`      // text used by strip mode
 }
 
 // MaxInspectBytes converts the IEC size string to bytes.
@@ -124,6 +140,29 @@ func (r *Root) setDefaults() {
 	if r.API.InternalAddr == "" {
 		r.API.InternalAddr = envOr("API_ADDR", "api:8000")
 	}
+	if r.Proxy.TextInspection.Mode == "" {
+		r.Proxy.TextInspection.Mode = strings.ToLower(envOr("TEXT_INSPECTION_MODE", "block"))
+	} else {
+		r.Proxy.TextInspection.Mode = strings.ToLower(r.Proxy.TextInspection.Mode)
+	}
+	if r.Proxy.TextInspection.NSFWThreshold == 0 {
+		r.Proxy.TextInspection.NSFWThreshold = envFloat("TEXT_NSFW_THRESHOLD", 0.5)
+	}
+	if r.Proxy.TextInspection.Redaction == "" {
+		r.Proxy.TextInspection.Redaction = envOr("TEXT_REDACTION", "[content removed by see-no-evil]")
+	}
+}
+
+func envFloat(key string, fallback float32) float32 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var f float32
+	if _, err := fmt.Sscan(v, &f); err != nil {
+		return fallback
+	}
+	return f
 }
 
 // PolicyAPIURL returns the base URL for the policy/decide HTTP endpoint.

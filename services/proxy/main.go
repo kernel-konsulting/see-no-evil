@@ -96,6 +96,11 @@ func main() {
 		MaxInspectBytes: cfg.Proxy.MaxInspectBytes(),
 		Classifiers:     classifierClients,
 		Policy:          policyClient,
+		TextInspection: mitm.TextInspectionCfg{
+			Mode:          cfg.Proxy.TextInspection.Mode,
+			NSFWThreshold: cfg.Proxy.TextInspection.NSFWThreshold,
+			Redaction:     cfg.Proxy.TextInspection.Redaction,
+		},
 	})
 
 	// HTTP proxy listener.
