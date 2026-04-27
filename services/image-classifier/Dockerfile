@@ -21,7 +21,7 @@ RUN pip install --upgrade pip \
 # Copy and install the service package
 COPY services/image-classifier/pyproject.toml ./
 COPY services/image-classifier/src/ ./src/
-RUN pip install --prefix=/install ".[]"
+RUN pip install --prefix=/install "."
 
 # Generate gRPC stubs from the shared proto into the installed package
 COPY shared/proto/classify.proto /proto/classify.proto

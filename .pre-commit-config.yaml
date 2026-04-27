@@ -55,13 +55,13 @@ repos:
     rev: v0.5.1
     hooks:
       - id: go-fmt
-        files: ^services/proxy/
+        files: ^services/proxy/.*\.go$
       - id: go-vet
-        files: ^services/proxy/
+        files: ^services/proxy/.*\.go$
         # go vet requires generated stubs; skip in pre-commit, CI handles it
         stages: [manual]
       - id: go-unit-tests
-        files: ^services/proxy/
+        files: ^services/proxy/.*\.go$
         stages: [manual]
 
   # ---------------------------------------------------------------------------
