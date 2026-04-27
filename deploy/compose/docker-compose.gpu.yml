@@ -1,0 +1,37 @@
+# =============================================================================
+# see-no-evil — GPU profile overlay
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#     --profile core up -d
+#
+# At M0 this is a placeholder; M1 will publish CUDA / OpenVINO / CoreML
+# variants of the classifier images.
+# =============================================================================
+
+name: seenoevil
+
+services:
+  image-classifier:
+    image: ghcr.io/kernel-konsulting/seenoevil-image-classifier:dev-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      SEENOEVIL_CLASSIFIER_DEVICE: cuda
+
+  text-classifier:
+    image: ghcr.io/kernel-konsulting/seenoevil-text-classifier:dev-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      SEENOEVIL_CLASSIFIER_DEVICE: cuda

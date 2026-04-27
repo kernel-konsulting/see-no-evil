@@ -1,0 +1,26 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+]
+ignore = [
+  # FastAPI's `Depends(...)` / `Query(...)` / `Cookie(...)` defaults are the
+  # idiomatic way to declare dependencies; B008 fires on every endpoint.
+  "B008",
+]
+
+[lint.per-file-ignores]
+"**/migrations/*" = ["E501"]
+"**/alembic/versions/*" = ["E501"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

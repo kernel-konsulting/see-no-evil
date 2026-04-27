@@ -1,0 +1,62 @@
+name: build-images
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "deploy/compose/**"
+      - ".github/workflows/build-images.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "deploy/compose/**"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build ${{ matrix.service }} (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, ui, proxy, dns, image-classifier, text-classifier, video-sampler, scanner, updater]
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # M0: build only — do not push. Pushing wires up in M1.
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          tags: ghcr.io/kernel-konsulting/seenoevil-${{ matrix.service }}:dev
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.service }}-${{ matrix.platform }},mode=max
+
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        working-directory: deploy/compose
+        run: |
+          mkdir -p secrets
+          : > secrets/postgres_password.txt
+          : > secrets/tailscale_authkey.txt
+          docker compose --profile core --profile scanner --profile postgres \
+                         --profile redis --profile observability \
+                         --profile vpn-tailscale --profile vpn-wg config > /dev/null
