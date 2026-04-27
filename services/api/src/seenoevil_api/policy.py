@@ -11,11 +11,16 @@ Decision order (first match wins):
 2. Quota check — if profile sets ``quota_minutes_per_day`` > 0 and today's
    usage already meets/exceeds it, ``block(reason="quota")``.
 3. Deny domains — exact or wildcard match on the URL host → ``block(reason="deny_domain")``.
-4. Allow domains — if the profile has any allow entries, only matching hosts
+4. URL keyword deny — substring match against the full URL path/query
+   → ``block(reason="deny_keyword")``.
+5. YouTube channel rules (only when host is YouTube):
+   * deny channel → ``block(reason="deny_youtube_channel")``
+   * channel allow-list set + no match → ``block(reason="youtube_channel_not_allowed")``
+6. Allow domains — if the profile has any allow entries, only matching hosts
    pass; everything else → ``block(reason="not_in_allowlist")``.
-5. Classifier scores — any class whose score >= the profile's threshold (with
+7. Classifier scores — any class whose score >= the profile's threshold (with
    fallback to global thresholds) → ``block(reason="classifier:<class>")``.
-6. Default → ``allow``.
+8. Default → ``allow``.
 """
 
 from __future__ import annotations
@@ -64,6 +69,11 @@ class ProfileView:
     quota_minutes_per_day: int
     allow_domains: list[str]
     deny_domains: list[str]
+    # URL substring patterns (case-insensitive) matched against path+query.
+    deny_url_keywords: list[str] = field(default_factory=list)
+    # YouTube channel identifiers/handles (e.g. "@LinusTechTips" or "UCxxxx").
+    allow_youtube_channels: list[str] = field(default_factory=list)
+    deny_youtube_channels: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +166,54 @@ def _host_of(url: str) -> str:
     return (parsed.hostname or "").lower()
 
 
+def _path_query_of(url: str) -> str:
+    parsed = urlparse(url if "://" in url else f"//{url}", scheme="http")
+    pq = parsed.path or ""
+    if parsed.query:
+        pq = f"{pq}?{parsed.query}"
+    return pq
+
+
+def _is_youtube_host(host: str) -> bool:
+    h = host.lower()
+    return h == "youtube.com" or h.endswith(".youtube.com") or h == "youtu.be"
+
+
+def _extract_youtube_channel(url: str) -> str | None:
+    """Extract a channel handle or ID from a YouTube URL path.
+
+    Recognises:
+      * /@handle
+      * /channel/UCxxxxxxxx
+      * /c/customname
+      * /user/legacyname
+
+    Returns the matched token (lowercase, including the leading ``@`` for
+    handles) or ``None`` if no channel segment was found.
+    """
+    path = _path_query_of(url).split("?", 1)[0]
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None
+    first = parts[0]
+    if first.startswith("@"):
+        return first.lower()
+    if len(parts) >= 2 and first in ("channel", "c", "user"):
+        return parts[1].lower()
+    return None
+
+
+def _channel_matches(pattern: str, channel: str) -> bool:
+    """Compare a configured channel pattern with an extracted channel token.
+
+    Both sides are lowercased. The pattern may include or omit a leading ``@``;
+    so ``LinusTechTips`` matches ``@linustechtips`` and vice versa.
+    """
+    p = pattern.strip().lower().lstrip("@")
+    c = channel.strip().lower().lstrip("@")
+    return bool(p) and bool(c) and p == c
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -185,11 +243,34 @@ def decide(
     if host and _match_any(profile.deny_domains, host):
         return DecisionOutput("block", "deny_domain")
 
-    # 4. Allow list (presence implies allow-list-only mode)
+    # 4. URL keyword/substring deny (case-insensitive on path+query).
+    if profile.deny_url_keywords:
+        pq = _path_query_of(inputs.url).lower()
+        for kw in profile.deny_url_keywords:
+            kw_norm = kw.strip().lower()
+            if kw_norm and kw_norm in pq:
+                return DecisionOutput("block", "deny_keyword")
+
+    # 5. YouTube channel allow/deny (only when host is YouTube).
+    if host and _is_youtube_host(host):
+        channel = _extract_youtube_channel(inputs.url)
+        if channel is not None:
+            if any(_channel_matches(p, channel) for p in profile.deny_youtube_channels):
+                return DecisionOutput("block", "deny_youtube_channel")
+            if profile.allow_youtube_channels and not any(
+                _channel_matches(p, channel) for p in profile.allow_youtube_channels
+            ):
+                return DecisionOutput("block", "youtube_channel_not_allowed")
+        elif profile.allow_youtube_channels:
+            # Channel allow-list set + URL is a YouTube URL with no channel
+            # info (e.g. /watch?v=...): conservative → block.
+            return DecisionOutput("block", "youtube_channel_not_allowed")
+
+    # 6. Allow list (presence implies allow-list-only mode)
     if profile.allow_domains and (not host or not _match_any(profile.allow_domains, host)):
         return DecisionOutput("block", "not_in_allowlist")
 
-    # 5. Classifier thresholds
+    # 7. Classifier thresholds
     global_image = config.classifiers.image.thresholds.model_dump() if config is not None else {}
     for cls, score in inputs.classifier_scores.items():
         threshold = profile.image_thresholds.get(cls)

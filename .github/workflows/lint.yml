@@ -50,7 +50,63 @@ jobs:
         if: steps.detect.outputs.has_go != 'true'
         run: echo "no Go modules yet (M0); skipping"
 
-  opa:
+  pytest:
+    name: Python (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - services/image-classifier
+          - services/text-classifier
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install service + test deps
+        working-directory: ${{ matrix.service }}
+        run: pip install --no-cache-dir ".[test]"
+      - name: Generate proto stubs (mock)
+        working-directory: ${{ matrix.service }}
+        # Install grpcio-tools to generate the stubs that tests import.
+        run: |
+          pip install --no-cache-dir grpcio-tools==1.67.1
+          SERVICE=$(basename $PWD | tr '-' '_')
+          mkdir -p src/seenoevil_${SERVICE}/generated
+          python -m grpc_tools.protoc \
+            -I../../shared/proto \
+            --python_out=src/seenoevil_${SERVICE}/generated \
+            --grpc_python_out=src/seenoevil_${SERVICE}/generated \
+            ../../shared/proto/classify.proto
+          sed -i 's/^import classify_pb2/from . import classify_pb2/' \
+            src/seenoevil_${SERVICE}/generated/classify_pb2_grpc.py
+      - name: pytest
+        working-directory: ${{ matrix.service }}
+        run: pytest
+
+  go-test:
+    name: Go (test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: services/proxy/go.sum
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -q --no-install-recommends protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.0
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+      - name: Generate proto stubs
+        working-directory: services/proxy
+        run: make generate
+      - name: go test
+        working-directory: services/proxy
+        run: go test ./...
+
+
     name: OPA (rego)
     runs-on: ubuntu-latest
     steps:

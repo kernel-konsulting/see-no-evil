@@ -1,20 +1,31 @@
 # syntax=docker/dockerfile:1.7
 # -----------------------------------------------------------------------------
-# see-no-evil — scanner (M0 stub)
+# see-no-evil — scanner
 # -----------------------------------------------------------------------------
-# Real image will install nmap and a Python wrapper. M0 stub only.
+# Periodic LAN sweep using nmap. Reports discovered devices (MAC + IP +
+# hostname + vendor) to the API at ``POST /v1/devices/discover``.
+#
+# Needs CAP_NET_RAW + CAP_NET_ADMIN to run nmap -sn (ARP ping). Granted at the
+# compose level, not in the image.
 # -----------------------------------------------------------------------------
-FROM alpine:3.20
+FROM python:3.12-slim AS runtime
 
-RUN addgroup -S -g 10001 app && adduser -S -G app -u 10001 -h /app -s /sbin/nologin app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nmap iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-COPY --chown=app:app entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-cache-dir -e .
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Note: real scanner needs CAP_NET_RAW + CAP_NET_ADMIN; granted via compose, not here.
-USER app
-HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/bin/sh", "-c", "test -f /tmp/ready"]
+# Container runs as root so nmap can use raw sockets. The scanner process
+# itself does no other privileged work.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["/bin/sh", "-c", "test -f /tmp/scanner_ready"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

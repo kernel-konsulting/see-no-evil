@@ -1,0 +1,35 @@
+// see-no-evil — policy decision gRPC contract
+//
+// Called by the Go proxy after it has collected classifier scores; the API
+// service runs this and returns a final action.
+
+syntax = "proto3";
+
+package seenoevil.policy.v1;
+
+option go_package = "github.com/kernel-konsulting/see-no-evil/gen/policy/v1;policyv1";
+
+import "classify.proto";
+
+message DecideRequest {
+  string request_id     = 1;
+  // MAC address of the originating device (best-effort; may be empty).
+  string device_mac     = 2;
+  string url            = 3;
+  string content_type   = 4;
+  // Scores from each classifier that ran.  May be empty if classifiers were
+  // bypassed (e.g. non-inspectable content type).
+  repeated seenoevil.classify.v1.Score image_scores = 5;
+  repeated seenoevil.classify.v1.Score text_scores  = 6;
+}
+
+message DecideResponse {
+  seenoevil.classify.v1.Action action = 1;
+  string reason                       = 2;
+  // Tags written to the audit log.
+  repeated string audit_tags          = 3;
+}
+
+service PolicyService {
+  rpc Decide(DecideRequest) returns (DecideResponse);
+}

@@ -25,8 +25,23 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   - `POST /v1/auth/logout`
   - `GET/POST/PATCH/DELETE /v1/profiles[/{id}]`
   - `GET/POST/PATCH/DELETE /v1/devices[/{id}]`
+  - `POST /v1/devices/discover` (M1.6 — scanner upserts MAC list)
   - `GET  /v1/audit`
   - `POST /v1/decide` (called by the proxy)
+  - `GET/POST/DELETE /v1/quarantine[/{id}[/allow|/deny]]` (M3 — quarantine queue)
+
+**M2 additions:**
+
+- URL keyword filter (`profiles.*.deny.url_keywords`).
+- YouTube channel allow/deny rules with handle/ID extraction.
+
+**M3 additions:**
+
+- `QuarantineItem` model + migration `0003_quarantine`.
+- `/v1/decide` auto-creates a pending quarantine entry when an image/video
+  response is blocked by the classifier (other block reasons stay out of the
+  queue to avoid noise).
+- `POST /v1/quarantine/{id}/allow` and `/deny` resolve items.
 
 **Deferred to follow-up M1 PRs:**
 

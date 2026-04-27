@@ -1,0 +1,87 @@
+# =============================================================================
+# see-no-evil — Blocky DNS configuration
+#
+# This file is the default shipped with the image.  At runtime, the entrypoint
+# script may overlay values from /data/config.yaml (via yq / envsubst).
+#
+# Blocky docs: https://0xerr0r.github.io/blocky/
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Upstream resolvers — Cloudflare 1.1.1.3 (family filter) by default.
+# Override by setting DNS_UPSTREAMS env var or editing config.yaml.
+# ---------------------------------------------------------------------------
+upstreams:
+  groups:
+    default:
+      - https://1.1.1.3/dns-query   # Cloudflare for Families (blocks NSFW)
+      - https://1.0.0.3/dns-query
+
+# ---------------------------------------------------------------------------
+# Blocking — per-group deny lists
+# ---------------------------------------------------------------------------
+blocking:
+  blackLists:
+    nsfw:
+      # Baked in at image build time; refreshed by the updater service.
+      - /data/lists/stevenblack.txt
+      - /data/lists/oisd_nsfw.txt
+    # Additional custom lists written by the API service (allow/deny per profile).
+    custom_deny:
+      - /data/lists/custom_deny.txt
+
+  whiteLists:
+    all:
+      - /data/lists/custom_allow.txt
+
+  # Group → client mapping.
+  # The proxy stamps X-Device-Group on connections; Blocky maps client IP to group.
+  # Default: all clients get the "nsfw" blocklist.
+  clientGroupsBlock:
+    default:
+      - nsfw
+      - custom_deny
+
+  blockType: nxDomain       # return NXDOMAIN for blocked names
+  blockTTL: 60s
+
+# ---------------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------------
+caching:
+  minTime: 5m
+  maxTime: 30m
+  maxItemsCount: 10000
+  prefetching: true
+  prefetchExpiration: 2h
+
+# ---------------------------------------------------------------------------
+# Query log — Blocky writes JSON logs; Vector picks them up.
+# ---------------------------------------------------------------------------
+queryLog:
+  type: console          # stdout; Vector tails container stdout
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+prometheus:
+  enable: true
+  path: /metrics
+
+# ---------------------------------------------------------------------------
+# REST API (used by the see-no-evil API to flush cache + manage groups)
+# ---------------------------------------------------------------------------
+ports:
+  dns: 53
+  http: 4000
+
+# ---------------------------------------------------------------------------
+# HTTPS for DoH (optional, Caddy terminates externally)
+# ---------------------------------------------------------------------------
+# httpPort: 4000   already set above
+
+# ---------------------------------------------------------------------------
+# Additional per-profile custom lists are written dynamically by the API
+# whenever a profile's allow/deny lists change.  Blocky hot-reloads on
+# SIGHUP (sent by the API after writing new lists).
+# ---------------------------------------------------------------------------

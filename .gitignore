@@ -48,6 +48,9 @@ Thumbs.db
 *.sqlite3
 secrets/
 *.pem
+
+# Internal working docs
+PLAN.md
 *.key
 !docs/**/*.key
 .env

@@ -1,0 +1,145 @@
+# see-no-evil — pre-commit hooks
+#
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# The user must install pre-commit first:
+#   pip install pre-commit   OR   brew install pre-commit
+#
+# Some hooks require extra tooling:
+#   - golangci-lint: brew install golangci-lint
+#   - protolint:     brew install protolint   OR   go install github.com/yoheimuta/protolint/cmd/protolint@latest
+#   - protoc:        brew install protobuf
+
+repos:
+  # ---------------------------------------------------------------------------
+  # General hygiene
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+        exclude: '(\.pb\.go|_pb2.*\.py)$'
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: no-commit-to-branch
+        args: [--branch=main]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ---------------------------------------------------------------------------
+  # Python — ruff (lint + format)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # ---------------------------------------------------------------------------
+  # Go — formatting + vet
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+        files: ^services/proxy/
+      - id: go-vet
+        files: ^services/proxy/
+        # go vet requires generated stubs; skip in pre-commit, CI handles it
+        stages: [manual]
+      - id: go-unit-tests
+        files: ^services/proxy/
+        stages: [manual]
+
+  # ---------------------------------------------------------------------------
+  # Go — golangci-lint (comprehensive; run in CI and on manual stage locally)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.64.8
+    hooks:
+      - id: golangci-lint
+        files: ^services/proxy/
+        stages: [manual]
+
+  # ---------------------------------------------------------------------------
+  # TypeScript / JavaScript — ESLint + Prettier
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.21.0
+    hooks:
+      - id: eslint
+        files: ^services/ui/src/
+        types_or: [javascript, jsx, ts, tsx]
+        additional_dependencies:
+          - eslint@9.21.0
+          - eslint-config-prettier@10.1.1
+          - "@typescript-eslint/parser@8.23.0"
+          - "@typescript-eslint/eslint-plugin@8.23.0"
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        files: ^services/ui/
+        types_or: [javascript, jsx, ts, tsx, css, json]
+        exclude: '(node_modules|dist|\.pb\.go|_pb2.*\.py)'
+
+  # ---------------------------------------------------------------------------
+  # Protocol Buffers — formatting
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/yoheimuta/protolint
+    rev: v0.51.5
+    hooks:
+      - id: protolint
+        files: ^shared/proto/
+        args: [lint]
+
+  # ---------------------------------------------------------------------------
+  # YAML — yamllint
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [-c=.yamllint.yml]
+        exclude: '^deploy/helm/'   # Helm templates use non-standard YAML
+
+  # ---------------------------------------------------------------------------
+  # Secrets — gitleaks
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.23.3
+    hooks:
+      - id: gitleaks
+
+  # ---------------------------------------------------------------------------
+  # OPA Rego (when policies/ gets files)
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: opa-fmt
+        name: opa fmt
+        language: system
+        entry: opa fmt --write
+        files: ^policies/.*\.rego$
+        pass_filenames: true
+      - id: opa-check
+        name: opa check
+        language: system
+        entry: opa check
+        files: ^policies/.*\.rego$
+        pass_filenames: true

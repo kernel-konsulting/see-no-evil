@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import AppConfig
-from ..models import AuditDecision, Device, Profile, Quota
+from ..models import AuditDecision, Device, Profile, QuarantineItem, Quota
 from ..policy import DecisionInput, ProfileView, decide, now_parts
 from ..schemas import DecideRequest, DecideResponse
 
@@ -22,6 +22,9 @@ def _profile_view(p: Profile) -> ProfileView:
         quota_minutes_per_day=int(p.quota_minutes_per_day or 0),
         allow_domains=list(p.allow_domains or []),
         deny_domains=list(p.deny_domains or []),
+        deny_url_keywords=list(p.deny_url_keywords or []),
+        allow_youtube_channels=list(p.allow_youtube_channels or []),
+        deny_youtube_channels=list(p.deny_youtube_channels or []),
     )
 
 
@@ -46,6 +49,20 @@ def _minutes_used_today(session: Session, device: Device | None, today: date) ->
         select(Quota).where(Quota.device_id == device.id, Quota.day == today)
     ).first()
     return int(row.minutes_used) if row else 0
+
+
+def _should_quarantine(reason: str, content_type: str | None) -> bool:
+    """Hold for review when a classifier blocked an image/video response.
+
+    Schedule/quota/domain blocks are too high-volume and not interesting to
+    review one-by-one.
+    """
+    if not reason.startswith("classifier:"):
+        return False
+    if content_type is None:
+        return True
+    ct = content_type.lower()
+    return ct.startswith("image/") or ct.startswith("video/")
 
 
 def make_router(get_session_dep, get_config) -> APIRouter:
@@ -93,6 +110,21 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                 classifier_scores=dict(body.classifier_scores),
             )
         )
+
+        if decision.decision == "block" and _should_quarantine(decision.reason, body.content_type):
+            session.add(
+                QuarantineItem(
+                    device_id=device.id if device else None,
+                    profile_id=profile.id,
+                    url=body.url,
+                    content_type=body.content_type,
+                    reason=decision.reason,
+                    classifier_scores=dict(body.classifier_scores),
+                    thumbnail_b64=body.thumbnail_b64,
+                    status="pending",
+                )
+            )
+
         session.commit()
 
         return DecideResponse(

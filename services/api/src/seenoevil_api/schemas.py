@@ -18,6 +18,7 @@ class ProfileBase(BaseModel):
     quota_minutes_per_day: int = 0
     allow_domains: list[str] = Field(default_factory=list)
     deny_domains: list[str] = Field(default_factory=list)
+    deny_url_keywords: list[str] = Field(default_factory=list)
     allow_youtube_channels: list[str] = Field(default_factory=list)
     deny_youtube_channels: list[str] = Field(default_factory=list)
     notify_on_block: bool = False
@@ -34,6 +35,7 @@ class ProfileUpdate(BaseModel):
     quota_minutes_per_day: int | None = None
     allow_domains: list[str] | None = None
     deny_domains: list[str] | None = None
+    deny_url_keywords: list[str] | None = None
     allow_youtube_channels: list[str] | None = None
     deny_youtube_channels: list[str] | None = None
     notify_on_block: bool | None = None
@@ -76,6 +78,36 @@ class DeviceOut(DeviceBase):
     updated_at: datetime
 
 
+class DiscoveredDevice(BaseModel):
+    """One device observed by the scanner."""
+
+    mac: str
+    ip: str | None = None
+    hostname: str | None = None
+    vendor: str | None = None
+
+    @field_validator("mac")
+    @classmethod
+    def _norm(cls, v: str) -> str:
+        return normalize_mac(v)
+
+
+class DiscoverRequest(BaseModel):
+    devices: list[DiscoveredDevice] = Field(default_factory=list)
+
+
+class DiscoverResponseItem(BaseModel):
+    mac: str
+    device_id: int
+    created: bool
+
+
+class DiscoverResponse(BaseModel):
+    profile_id: int
+    profile_name: str
+    items: list[DiscoverResponseItem] = Field(default_factory=list)
+
+
 class AuditOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -97,6 +129,9 @@ class DecideRequest(BaseModel):
     classifier_scores: dict[str, float] = Field(default_factory=dict)
     device_mac: str | None = None
     device_id: int | None = None
+    # Optional small base64-encoded blurred preview, supplied by the proxy
+    # for image/video responses so the quarantine queue can render thumbnails.
+    thumbnail_b64: str | None = None
 
     @field_validator("device_mac")
     @classmethod
@@ -123,3 +158,19 @@ class LoginResponse(BaseModel):
 class SetupRequest(BaseModel):
     email: str
     password: str = Field(min_length=8)
+
+
+class QuarantineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    ts: datetime
+    device_id: int | None
+    profile_id: int | None
+    url: str
+    content_type: str | None
+    reason: str
+    classifier_scores: dict[str, Any]
+    thumbnail_b64: str | None
+    status: str
+    resolved_at: datetime | None
+    resolved_by: str | None

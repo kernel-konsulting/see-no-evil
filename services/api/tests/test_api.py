@@ -150,3 +150,124 @@ def test_logout_clears_cookie(admin_client: TestClient) -> None:
     admin_client.cookies.clear()
     r = admin_client.post("/v1/profiles", json={"name": "blocked"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# M3 — Quarantine queue
+# ---------------------------------------------------------------------------
+
+
+def _seed_image_block(admin_client: TestClient, *, scores: dict[str, float]) -> dict:
+    r = admin_client.post(
+        "/v1/decide",
+        json={
+            "url": "https://example.com/pic.jpg",
+            "content_type": "image/jpeg",
+            "device_mac": "ff:ff:ff:ff:ff:ff",
+            "classifier_scores": scores,
+        },
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_quarantine_created_on_classifier_block(admin_client: TestClient) -> None:
+    body = _seed_image_block(admin_client, scores={"porn": 0.99})
+    assert body["decision"] == "block"
+    assert body["reason"].startswith("classifier:")
+
+    items = admin_client.get("/v1/quarantine").json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["url"] == "https://example.com/pic.jpg"
+    assert item["status"] == "pending"
+    assert item["reason"] == "classifier:porn"
+
+
+def test_quarantine_not_created_for_domain_block(admin_client: TestClient) -> None:
+    profiles = admin_client.get("/v1/profiles").json()
+    kids_id = next(p["id"] for p in profiles if p["name"] == "kids")
+    dev = admin_client.post(
+        "/v1/devices", json={"mac": "aa:bb:cc:dd:ee:01", "profile_id": kids_id}
+    ).json()
+    r = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://www.tiktok.com/foo", "device_id": dev["id"]},
+    )
+    assert r.json()["decision"] == "block"
+    items = admin_client.get("/v1/quarantine").json()
+    assert items == []
+
+
+def test_quarantine_skips_non_image_content(admin_client: TestClient) -> None:
+    r = admin_client.post(
+        "/v1/decide",
+        json={
+            "url": "https://example.com/page.html",
+            "content_type": "text/html",
+            "device_mac": "ff:ff:ff:ff:ff:ff",
+            "classifier_scores": {"porn": 0.99},
+        },
+    )
+    assert r.json()["decision"] == "block"
+    assert admin_client.get("/v1/quarantine").json() == []
+
+
+def test_quarantine_allow_and_deny_lifecycle(admin_client: TestClient) -> None:
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+
+    items = admin_client.get("/v1/quarantine").json()
+    assert len(items) == 2
+    a, b = items[0]["id"], items[1]["id"]
+
+    allowed = admin_client.post(f"/v1/quarantine/{a}/allow").json()
+    assert allowed["status"] == "allowed"
+    assert allowed["resolved_by"] == "admin"
+
+    denied = admin_client.post(f"/v1/quarantine/{b}/deny").json()
+    assert denied["status"] == "denied"
+
+    # Pending list should now be empty.
+    pending = admin_client.get("/v1/quarantine").json()
+    assert pending == []
+
+    # Resolving twice is a 409.
+    again = admin_client.post(f"/v1/quarantine/{a}/allow")
+    assert again.status_code == 409
+
+
+def test_quarantine_filter_by_status(admin_client: TestClient) -> None:
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    item_id = admin_client.get("/v1/quarantine").json()[0]["id"]
+    admin_client.post(f"/v1/quarantine/{item_id}/deny")
+
+    assert admin_client.get("/v1/quarantine", params={"status": "denied"}).json()
+    assert admin_client.get("/v1/quarantine", params={"status": "pending"}).json() == []
+    assert admin_client.get("/v1/quarantine", params={"status": "all"}).json()
+
+
+def test_quarantine_admin_only(client: TestClient) -> None:
+    # Need to first generate an item via the unauthenticated decide endpoint.
+    client.post(
+        "/v1/decide",
+        json={
+            "url": "https://example.com/pic.jpg",
+            "content_type": "image/jpeg",
+            "classifier_scores": {"porn": 0.99},
+        },
+    )
+    items = client.get("/v1/quarantine").json()
+    assert len(items) == 1
+    item_id = items[0]["id"]
+    r = client.post(f"/v1/quarantine/{item_id}/allow")
+    assert r.status_code == 401
+
+
+def test_quarantine_delete(admin_client: TestClient) -> None:
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    item_id = admin_client.get("/v1/quarantine").json()[0]["id"]
+    admin_client.post(f"/v1/quarantine/{item_id}/deny")
+    r = admin_client.delete(f"/v1/quarantine/{item_id}")
+    assert r.status_code == 204
+    assert admin_client.get(f"/v1/quarantine/{item_id}").status_code == 404
