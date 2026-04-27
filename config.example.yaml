@@ -119,6 +119,16 @@ proxy:
   # without body inspection (URL + content-type rules still apply).
   max_inspect_body: 10MiB
 
+  # Text inspection mode (M4). The proxy extracts natural-language text from
+  # HTML and JSON response bodies and runs it through the text classifier.
+  #   off   — skip text classification entirely.
+  #   block — block the whole page when any segment is flagged (default).
+  #   strip — re-render the body with flagged segments replaced by `redaction`.
+  text_inspection:
+    mode:           block
+    nsfw_threshold: 0.5
+    redaction:      "[content removed by see-no-evil]"
+
 
 # -----------------------------------------------------------------------------
 # ui — admin UI / API surface
