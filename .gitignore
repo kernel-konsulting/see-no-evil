@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.next/
+.nuxt/
+.cache/
+
+# Go
+*.test
+*.out
+vendor/
+bin/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Project
+/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+secrets/
+*.pem
+*.key
+!docs/**/*.key
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+*.log
+coverage/
+dist-*/
+secrets/

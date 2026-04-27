@@ -1,3 +1,112 @@
 # see-no-evil
-self hosted proxy with image classification to block NSFW content
-I want to build a multi container pod application that (using as many already open source solutions) does MITM proxy, DNS blocking of NSFW sites, URL inspection and blocks based off text in URL, body inspection that drops full pages or removes parts of body that contain NSFW content, as well as image classification and drops any NSFW content as well as video (just pulls some % of frames of the video and checks those frames if any frame is flagged the whole video is dropped). there would be a UI that allows users to configure how strict as well as black/white list websites both DNS or from being monitored at all if they want. I am thinking https://huggingface.co/Freepik/nsfw_image_detector?not-for-all-audiences=true this model unless you know of a better one. also I am open to more ideas of features, obviously we need logging and some sort of auth integration. I was thinking also maybe a scanner to find all the devices on the network to try and help people maybe white list devices to not be blocked (eg maybe parents phones or tvs etc). the goal would be to try and make this as use friendly as possible. the pod should be able to run on Podman/docker and even k8s either on someones computer, dedicated hardware or maybe a cloud provider/saas type. there needs to be an easy way to connect to it (I am thinking maybe having 2 options here tailscale and true proxy like wireguard) and an easy way to deal with cert(s) for the MITM stuff that basic users can figure out, and configure for their phones, computers, etc. I also want this to go public someday, I want it to be free to use but no one can sell it or make money from it without permission so whatever license covers that. one reason I like that model is it triggers on "soft" NSFW content which some people want to block and I want to give people the option on how strict the filter(s) are.
+
+> Self-hosted, multi-container content-filtering pod for home networks, schools, and noncommercial orgs.
+
+`see-no-evil` is an opinionated, mostly-offline pod that combines DNS blocking, MITM
+TLS inspection, URL/body text classification, image classification, and video frame
+sampling to filter NSFW (and other configured) content on a network you control. It
+ships as a set of containers you can run on Podman, Docker Compose, or Kubernetes —
+on a Raspberry Pi 5, an old NUC, dedicated hardware, or a self-managed cloud VM.
+
+**Status:** very early. This is the **M0 scaffolding** milestone — repository
+layout, license, configuration shape, architecture docs, and empty service
+skeletons. Nothing is functional yet.
+
+---
+
+## Goals
+
+- **Block NSFW content** at multiple layers: DNS, URL, page body text, images, and
+  sampled video frames.
+- **Friendly to non-experts:** sane defaults, install wizard, one config file,
+  printable cert-install instructions for phones / laptops / TVs.
+- **Privacy-respecting by default:** the pod can pull updates (blocklists, model
+  weights, OUI database) but **inspected user content never leaves the box**.
+- **Bring-your-own scale:** SQLite + embedded cache out of the box; swap to
+  Postgres + Redis for orgs / non-profits with more devices.
+- **Pluggable transport in:** access the admin UI directly on the LAN, behind your
+  existing reverse proxy, via Tailscale, or via a bundled WireGuard option.
+- **Truly offline-capable** after first start: model weights, blocklists, and
+  fingerprint DBs are cached to a local volume.
+
+## Non-goals
+
+- A commercial SaaS. The license (PolyForm Noncommercial 1.0.0) explicitly forbids
+  selling this software or running it as a paid service without permission.
+- Replacing endpoint controls. MITM inspection cannot beat cert-pinned mobile
+  apps; those land in the device-bypass / DNS-only flow and are documented as
+  such.
+- A general-purpose forward proxy. The MITM data-plane is purpose-built for
+  classification and policy, not anonymity or caching.
+
+## Architecture (one-line summary)
+
+> A DNS resolver and an explicit MITM proxy sit on the LAN. The proxy fans
+> request/response bodies out to image, text, and video classifiers over gRPC;
+> a small policy service (with embedded OPA) decides allow / block / strip /
+> warn. An admin API + React UI is served behind Caddy on a friendly hostname
+> with its own (separate) cert.
+
+See [`docs/architecture.md`](docs/architecture.md) for the full picture, including
+the **two completely separate TLS surfaces** (admin UI cert vs. MITM CA).
+
+## Quick start (placeholder)
+
+```bash
+# Not functional yet — this is what the M1 quickstart will look like.
+git clone https://github.com/kernel-konsulting/see-no-evil.git
+cd see-no-evil
+cp config.example.yaml config.yaml
+# edit config.yaml — at minimum set pod.hostname and auth.builtin.admin_email
+docker compose --profile core up -d
+# then visit https://seenoevil.lan and follow the install wizard
+```
+
+Hardware sizing notes are in [`docs/hardware-sizing.md`](docs/hardware-sizing.md).
+The threat model and what this tool can and **cannot** protect against is in
+[`docs/threat-model.md`](docs/threat-model.md).
+
+## Configuration
+
+A single, heavily commented [`config.example.yaml`](config.example.yaml) is the
+source of truth for every knob. Copy it to `config.yaml` and edit. Highlights:
+
+- `db.url` — SQLite by default, set to a `postgres://` URL for org deployments.
+- `cache.kind` — `embedded` by default, set to `redis` for org deployments.
+- `dns.upstreams` — defaults to Cloudflare `1.1.1.3` (family / NSFW-blocking).
+- `proxy.ca` — auto-generate a CA on first start, or BYO if you run an internal PKI.
+- `profiles` — first-class objects (Kid-A, Adults, Guests, …) that devices attach
+  to. No per-kid logins required.
+- `scanner.enabled` — optional nmap-based device discovery.
+
+## Repository layout
+
+```
+.
+├── LICENSE                     PolyForm Noncommercial 1.0.0
+├── README.md                   you are here
+├── config.example.yaml         the one config file users edit
+├── docs/                       architecture, threat model, hardware sizing
+├── deploy/compose/             docker-compose profiles (core, gpu, scanner, …)
+├── services/                   one directory per container (Dockerfile stubs only at M0)
+│   ├── api/                    FastAPI control plane + DB
+│   ├── ui/                     React admin UI
+│   ├── proxy/                  Go MITM data-plane
+│   ├── dns/                    Blocky wrapper + blocklist updater
+│   ├── image-classifier/       Python + ONNX
+│   ├── text-classifier/        Python + ONNX
+│   ├── video-sampler/          Go + ffmpeg, calls image-classifier
+│   ├── scanner/                Optional nmap + mDNS / SSDP discovery
+│   └── updater/                Pulls blocklists, model weights, OUI DB
+└── .github/workflows/          CI: lint, opa test, multi-arch buildx skeleton
+```
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE). Free for personal, hobby, educational,
+non-profit, and government use. **Selling this software, or running it as a paid
+service, requires explicit permission.** See the license for the full terms.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Security issues: see [`SECURITY.md`](SECURITY.md).
