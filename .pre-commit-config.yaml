@@ -85,7 +85,7 @@ repos:
         types_or: [javascript, jsx, ts, tsx]
         additional_dependencies:
           - eslint@9.21.0
-          - eslint-config-prettier@10.1.1
+          - eslint-config-prettier@10.1.8
           - "@typescript-eslint/parser@8.23.0"
           - "@typescript-eslint/eslint-plugin@8.59.0"
         args: [--fix]
