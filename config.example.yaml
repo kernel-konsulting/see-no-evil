@@ -155,14 +155,17 @@ auth:
     # Set on first start; password is set via the install wizard, not this file.
     admin_email: admin@example.local
 
-  # Optional OIDC. If `issuer` is set, OIDC takes precedence over the built-in
-  # admin for sign-in (built-in remains for break-glass).
+  # Optional OIDC. When `enabled: true`, the UI shows a "Sign in with SSO"
+  # button alongside the local password form. Built-in remains for break-glass.
+  # See docs/oidc.md for the full flow + IdP setup tips.
   oidc:
     enabled: false
     # issuer:        https://accounts.google.com
     # client_id:     ""
-    # client_secret_file: /run/secrets/oidc_client_secret
-    # allowed_emails: ["you@example.com"]
+    # client_secret: ""
+    # redirect_url:  https://seenoevil.lan/v1/auth/oidc/callback
+    # allowed_emails: ["you@example.com"]   # empty list = trust whatever the IdP returns
+    # scopes: [openid, email, profile]
 
   # WebAuthn / passkey support. Recommended once you have a hostname that
   # resolves consistently on your LAN.
@@ -355,29 +358,41 @@ observability:
 
 
 # -----------------------------------------------------------------------------
-# notifications — opt-in outbound for "kid hit a block" style alerts
+# notifications — opt-in outbound for "kid hit a block" style alerts.
+#
+# Triggered on:
+#   * any /v1/decide block whose profile has notify_on_block: true
+#   * panic-relax mode being enabled or disabled
+#
+# Fired best-effort from a FastAPI BackgroundTask so policy decisions never
+# block on the network. Both transports are optional; leave both unset to
+# disable outbound HTTP entirely.
 # -----------------------------------------------------------------------------
 notifications:
-  ntfy:
-    enabled: false
-    # url: https://ntfy.sh/CHANGE-ME
-    # priority: default
-  webhooks:
-    # - name: parents-slack
-    #   url: https://hooks.slack.com/services/...
-    #   on: [block, quota_exceeded]
+  enabled: true
+  # ntfy_url:      https://ntfy.sh/your-private-topic
+  # webhook_url:   https://example.com/seenoevil-hook
+  # webhook_token: change-me   # sent as Authorization: Bearer ...
+  timeout_seconds: 5
 
 
 # -----------------------------------------------------------------------------
-# backup
+# backup — local snapshot tarballs of /data (policy.db + ca/ + models/)
 # -----------------------------------------------------------------------------
+# Use the `backup` compose profile to run snapshots on a cron, or invoke
+# `seenoevil-backup snapshot` ad-hoc. See docs/backup.md.
 backup:
   local_path: /data/backups
-  interval:   24h
-  retention:  14
-  # Optional encrypted offsite (Litestream-style streaming for SQLite).
-  # offsite:
-  #   kind: s3
-  #   bucket: my-bucket
-  #   prefix: seenoevil/
-  #   age_recipients_file: /run/secrets/age_recipients.txt
+  interval:   24h     # informational; sidecar reads SNE_BACKUP_INTERVAL_SECONDS
+  retention:  14      # keep at most N snapshots; oldest are pruned
+
+
+# -----------------------------------------------------------------------------
+# litestream — optional continuous replication of policy.db to S3
+# -----------------------------------------------------------------------------
+# Enabling this is just a config-side toggle that the install docs check;
+# the actual replication is run by the `litestream` compose profile and
+# configured via services/api/litestream.yml. See docs/backup.md.
+litestream:
+  enabled: false
+  # replica_url: s3://my-bucket/policy.db

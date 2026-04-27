@@ -67,6 +67,9 @@ class Device(Base):
         ForeignKey("profiles.id", ondelete="RESTRICT"), nullable=False
     )
     bypass_proxy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Latest values reported by the scanner; nullable when only a static MAC is known.
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    vendor: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

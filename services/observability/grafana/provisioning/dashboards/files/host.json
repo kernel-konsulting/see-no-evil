@@ -1,0 +1,81 @@
+{
+  "title": "see-no-evil — host & runtime",
+  "uid": "sne-host",
+  "tags": ["seenoevil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Container CPU (cores)",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "rate(container_cpu_user_seconds_total{name=~\"seenoevil-.*\"}[5m])", "legendFormat": "{{name}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Container RSS (bytes)",
+      "id": 2,
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "container_memory_rss{name=~\"seenoevil-.*\"}", "legendFormat": "{{name}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "stat",
+      "title": "API DB size",
+      "id": 3,
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 4},
+      "targets": [{"expr": "seenoevil_db_size_bytes"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "stat",
+      "title": "Audit rows",
+      "id": 4,
+      "gridPos": {"x": 6, "y": 8, "w": 6, "h": 4},
+      "targets": [{"expr": "seenoevil_audit_rows"}]
+    },
+    {
+      "type": "stat",
+      "title": "Models cache size",
+      "id": 5,
+      "gridPos": {"x": 12, "y": 8, "w": 6, "h": 4},
+      "targets": [{"expr": "seenoevil_models_cache_bytes"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "stat",
+      "title": "Last successful backup",
+      "id": 6,
+      "gridPos": {"x": 18, "y": 8, "w": 6, "h": 4},
+      "targets": [{"expr": "time() - seenoevil_last_backup_timestamp"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 86400}, {"color": "red", "value": 172800}]}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "DNS queries/sec",
+      "id": 7,
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(blocky_query_total[5m])) by (response_type)", "legendFormat": "{{response_type}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scanner runs",
+      "id": 8,
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "rate(scanner_scans_total[1h])", "legendFormat": "scans/h"},
+        {"expr": "rate(scanner_errors_total[1h])", "legendFormat": "errors/h"}
+      ]
+    }
+  ]
+}

@@ -14,6 +14,8 @@ export interface Device {
   name: string | null;
   profile_id: number;
   bypass_proxy: boolean;
+  ip: string | null;
+  vendor: string | null;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -78,7 +80,10 @@ http.interceptors.response.use(
 // Auth
 // ---------------------------------------------------------------------------
 
-export async function login(username: string, password: string): Promise<TokenResponse> {
+export async function login(
+  username: string,
+  password: string,
+): Promise<TokenResponse> {
   const { data } = await http.post<TokenResponse>("/auth/login", {
     email: username,
     password,
@@ -124,7 +129,8 @@ export async function listProfiles(): Promise<Profile[]> {
 }
 
 export async function createProfile(
-  payload: Pick<Profile, "name"> & Partial<Omit<Profile, "id" | "created_at" | "updated_at">>,
+  payload: Pick<Profile, "name"> &
+    Partial<Omit<Profile, "id" | "created_at" | "updated_at">>,
 ): Promise<Profile> {
   const { data } = await http.post<Profile>("/profiles", payload);
   return data;

@@ -1,0 +1,85 @@
+{
+  "title": "see-no-evil — classifiers",
+  "uid": "sne-classifiers",
+  "tags": ["seenoevil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Image classifications/min",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(image_classifier_classifications_total[5m])) * 60"}]
+    },
+    {
+      "type": "stat",
+      "title": "Text classifications/min",
+      "id": 2,
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(text_classifier_classifications_total[5m])) * 60"}]
+    },
+    {
+      "type": "stat",
+      "title": "Video frames/min",
+      "id": 3,
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(video_sampler_frames_total[5m])) * 60"}]
+    },
+    {
+      "type": "stat",
+      "title": "Classifier errors (1h)",
+      "id": 4,
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{
+        "expr": "sum(increase(image_classifier_model_errors_total[1h])) + sum(increase(text_classifier_model_errors_total[1h])) + sum(increase(proxy_classifier_errors_total[1h]))"
+      }],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 50}]}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Image classifier latency",
+      "id": 5,
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(image_classifier_classify_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(image_classifier_classify_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(image_classifier_classify_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Text classifier latency",
+      "id": 6,
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(text_classifier_classify_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(text_classifier_classify_seconds_bucket[5m])) by (le))", "legendFormat": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Proxy classifier errors by classifier",
+      "id": 7,
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(proxy_classifier_errors_total[5m])) by (classifier)", "legendFormat": "{{classifier}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Video sampler throughput (bytes/s)",
+      "id": 8,
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "rate(video_sampler_bytes_total[5m])", "legendFormat": "bytes/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    }
+  ]
+}

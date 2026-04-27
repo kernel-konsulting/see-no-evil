@@ -1,0 +1,18 @@
+# Litestream replication for see-no-evil's SQLite policy DB.
+#
+# Set LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY env vars
+# (or use IAM roles / instance metadata) before enabling the `litestream`
+# compose profile. See docs/backup.md.
+
+dbs:
+  - path: /data/policy.db
+    replicas:
+      - type: s3
+        # Override these for your bucket/region/endpoint:
+        bucket: ${LITESTREAM_BUCKET:-seenoevil-backups}
+        path: ${LITESTREAM_PATH:-policy.db}
+        region: ${LITESTREAM_REGION:-us-east-1}
+        # endpoint: https://<your-s3-compatible-host>
+        retention: 168h
+        snapshot-interval: 24h
+        sync-interval: 10s

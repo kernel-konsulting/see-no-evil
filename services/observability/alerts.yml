@@ -1,0 +1,88 @@
+# vmalert rule groups for see-no-evil.
+#
+# Loaded by the `observability` compose profile; vmalert evaluates these
+# against VictoriaMetrics and forwards firing alerts to whatever notifier
+# you've configured (default: ntfy via the API's notifications fan-out).
+#
+# Severity levels:
+#   critical  — pod is degraded; an operator should act within minutes
+#   warning   — drift / slow leak; act within a day
+#   info      — informational; surface in the UI banner
+
+groups:
+  - name: seenoevil.availability
+    interval: 30s
+    rules:
+      - alert: ProxyDown
+        expr: absent_over_time(up{job="proxy"}[2m]) or up{job="proxy"} == 0
+        for: 2m
+        labels: {severity: critical, service: proxy}
+        annotations:
+          summary: "MITM proxy is not scrapeable"
+          description: "Clients on the LAN are likely getting connection refused."
+
+      - alert: ImageClassifierDown
+        expr: absent_over_time(up{job="image-classifier"}[2m]) or up{job="image-classifier"} == 0
+        for: 3m
+        labels: {severity: critical, service: image-classifier}
+        annotations:
+          summary: "Image classifier is down"
+          description: "Proxy is failing open on image inspection."
+
+      - alert: TextClassifierDown
+        expr: absent_over_time(up{job="text-classifier"}[2m]) or up{job="text-classifier"} == 0
+        for: 3m
+        labels: {severity: critical, service: text-classifier}
+        annotations: {summary: "Text classifier is down"}
+
+      - alert: APIDown
+        expr: absent_over_time(up{job="api"}[2m]) or up{job="api"} == 0
+        for: 2m
+        labels: {severity: critical, service: api}
+        annotations: {summary: "Control-plane API is unreachable"}
+
+  - name: seenoevil.quality
+    interval: 1m
+    rules:
+      - alert: ProxyHighLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum(rate(proxy_request_duration_seconds_bucket[5m])) by (le)) > 2
+        for: 10m
+        labels: {severity: warning, service: proxy}
+        annotations:
+          summary: "Proxy p95 latency over 2s for 10m"
+          description: "Inspection is slow. Check classifier latency + CPU saturation."
+
+      - alert: ClassifierErrorBurst
+        expr: |
+          sum(increase(proxy_classifier_errors_total[5m])) > 50
+        for: 5m
+        labels: {severity: warning, service: proxy}
+        annotations: {summary: "Classifier RPC errors spiking"}
+
+      - alert: QuarantineQueueGrowing
+        expr: seenoevil_quarantine_pending > 50
+        for: 30m
+        labels: {severity: warning, service: api}
+        annotations:
+          summary: "Quarantine queue >50 items for 30m"
+          description: "Operator review is falling behind."
+
+      - alert: PanicRelaxActive
+        expr: seenoevil_panic_active == 1
+        for: 1m
+        labels: {severity: info, service: api}
+        annotations:
+          summary: "Panic-relax mode is active"
+          description: "All filtering is bypassed until panic-relax is disabled."
+
+  - name: seenoevil.backup
+    interval: 5m
+    rules:
+      - alert: BackupStale
+        expr: time() - seenoevil_last_backup_timestamp > 86400 * 2
+        for: 30m
+        labels: {severity: warning, service: api}
+        annotations:
+          summary: "No successful backup in 48h"
+          description: "Check the `backup` sidecar and backup.local_path on the host."

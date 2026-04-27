@@ -11,6 +11,8 @@
 #   observability     Vector + VictoriaMetrics + Grafana
 #   vpn-tailscale     Tailscale sidecar
 #   vpn-wg            wg-easy
+#   backup            sidecar that runs `seenoevil-backup snapshot` on a cron
+#   litestream        sidecar that streams /data/policy.db to an S3-compatible target
 #
 # Usage:
 #   # First-run only — configure admin account:
@@ -318,6 +320,49 @@ services:
       - data:/etc/wireguard
 
   # -------------------------------------------------------------------------
+  # backup profile (optional) — periodic local snapshots of the policy DB + CA.
+  # Use this when you want point-in-time tarballs you can copy off-box.
+  # For continuous replication, use the `litestream` profile instead.
+  # -------------------------------------------------------------------------
+  backup:
+    profiles: [backup]
+    build: ../../services/api
+    image: ghcr.io/kernel-konsulting/seenoevil-api:dev
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - data:/data
+      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+    environment:
+      SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+      SNE_BACKUP_INTERVAL_SECONDS: "${SNE_BACKUP_INTERVAL_SECONDS:-86400}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        while true; do
+          seenoevil-backup snapshot || echo "snapshot failed (continuing)"
+          sleep "$$SNE_BACKUP_INTERVAL_SECONDS"
+        done
+
+  # -------------------------------------------------------------------------
+  # litestream profile (optional) — continuous replication of /data/policy.db
+  # to an S3-compatible target. See docs/backup.md.
+  # -------------------------------------------------------------------------
+  litestream:
+    profiles: [litestream]
+    image: litestream/litestream:0.3
+    restart: unless-stopped
+    networks: [edge]
+    volumes:
+      - data:/data
+      - ../../services/api/litestream.yml:/etc/litestream.yml:ro
+    environment:
+      LITESTREAM_ACCESS_KEY_ID: "${LITESTREAM_ACCESS_KEY_ID:-}"
+      LITESTREAM_SECRET_ACCESS_KEY: "${LITESTREAM_SECRET_ACCESS_KEY:-}"
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+
+  # -------------------------------------------------------------------------
   # observability profile (optional)
   # -------------------------------------------------------------------------
   vector:
@@ -367,6 +412,44 @@ services:
     depends_on:
       victoriametrics:
         condition: service_healthy
+
+  vmalert:
+    profiles: [observability]
+    image: victoriametrics/vmalert:stable
+    restart: unless-stopped
+    networks: [internal]
+    command:
+      - "--datasource.url=http://victoriametrics:8428"
+      - "--remoteWrite.url=http://victoriametrics:8428"
+      - "--notifier.url=http://api:8000/v1/alerts/webhook"
+      - "--rule=/etc/vmalert/alerts.yml"
+      - "--evaluationInterval=30s"
+    volumes:
+      - ../../services/observability/alerts.yml:/etc/vmalert/alerts.yml:ro
+    depends_on:
+      victoriametrics:
+        condition: service_healthy
+
+  cadvisor:
+    profiles: [observability]
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    networks: [internal]
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
 # ---------------------------------------------------------------------------
 # Secrets (file-based; create them under deploy/compose/secrets/)
