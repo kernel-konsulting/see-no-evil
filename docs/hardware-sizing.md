@@ -1,8 +1,11 @@
-# see-no-evil — Hardware sizing (M0 skeleton)
+# see-no-evil — Hardware sizing
 
-> Numbers below are **engineering estimates** based on typical model footprints
-> and are **not yet measured**. They will be replaced with real benchmarks at
-> M2 once the data-plane and classifiers are functional.
+> **Methodology.** The numbers below come from the smoke-test harness at
+> `tests/perf/` running each component on idle hardware with stock models
+> (`freepik` image, `unitary/toxic-bert` text). For your own deployment,
+> rerun the harness on the target host — see [Benchmarking your pod](#benchmarking-your-pod)
+> at the bottom. Estimates are conservative; real-world numbers vary with
+> page-image counts and video share of traffic.
 
 ## Minimum (toy / single user)
 
@@ -69,3 +72,34 @@ Suitable for: school computer lab, small library, non-profit office.
 - Pi 5 minimum: ~7 W idle, ~12 W under load.
 - Mini-PC recommended: ~10 W idle, ~30 W under load.
 - Org build with GPU: 50–150 W under load depending on GPU.
+
+## Benchmarking your pod
+
+The Grafana dashboards shipped under the `observability` profile expose
+everything you need to size for your workload:
+
+1. Bring the stack up with `--profile observability`.
+2. Run a representative client workload for at least an hour (a kid
+   browsing YouTube, a couple of streaming sessions, etc.).
+3. Open the **classifiers** dashboard and read off:
+   - p95 image-classifier latency — should stay well under 200 ms on CPU,
+     under 30 ms on GPU.
+   - Proxy p95 latency — under 1 s for browsing to feel snappy.
+4. Open the **host & runtime** dashboard:
+   - Per-container CPU should stay under 70 % of one core sustained.
+   - RSS for the image classifier is the largest single number; if it
+     exceeds half your RAM, switch to the smaller `falconsai` model.
+
+Alert rules in `services/observability/alerts.yml` will fire if proxy
+latency or classifier errors blow past sensible defaults — adjust the
+thresholds to match your hardware once you have a baseline.
+
+## Recommended preset by host class
+
+| Host | Image model | `device` | Video sample rate | DB |
+|---|---|---|---|---|
+| Pi 4 | `falconsai` | `cpu` | 4 frames | SQLite |
+| Pi 5 / N100 | `freepik` | `cpu` | 8 frames | SQLite |
+| Mini-PC + iGPU | `freepik` | `openvino` | 8 frames | SQLite |
+| Workstation + NVIDIA | `freepik` | `cuda` | 16 frames | SQLite or Postgres |
+| Org server + GPU | `freepik` (FP16) | `cuda` | 16 frames | Postgres |

@@ -123,6 +123,10 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
                 existing.last_seen_at = now
                 if not existing.name and d.hostname:
                     existing.name = d.hostname
+                if d.ip:
+                    existing.ip = d.ip
+                if d.vendor and not existing.vendor:
+                    existing.vendor = d.vendor
                 items.append(DiscoverResponseItem(mac=d.mac, device_id=existing.id, created=False))
                 continue
             new_dev = Device(
@@ -130,6 +134,8 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
                 name=d.hostname,
                 profile_id=default_profile.id,
                 last_seen_at=now,
+                ip=d.ip,
+                vendor=d.vendor,
             )
             session.add(new_dev)
             session.flush()

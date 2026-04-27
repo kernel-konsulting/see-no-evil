@@ -4,7 +4,7 @@
   "tags": ["seenoevil"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {"from": "now-6h", "to": "now"},
   "panels": [
@@ -26,6 +26,21 @@
       "fieldConfig": {"defaults": {"unit": "percentunit"}}
     },
     {
+      "type": "stat",
+      "title": "Devices seen",
+      "id": 5,
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "scanner_devices_seen"}]
+    },
+    {
+      "type": "stat",
+      "title": "Quarantine queue",
+      "id": 6,
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "seenoevil_quarantine_pending"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 25}]}}}
+    },
+    {
       "type": "timeseries",
       "title": "Decisions over time",
       "id": 3,
@@ -36,10 +51,49 @@
     },
     {
       "type": "timeseries",
-      "title": "Devices discovered (scanner)",
-      "id": 4,
-      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
-      "targets": [{"expr": "scanner_devices_seen"}]
+      "title": "Top block reasons",
+      "id": 7,
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "topk(8, sum(rate(seenoevil_decide_total{decision=\"block\"}[5m])) by (reason))", "legendFormat": "{{reason}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Proxy request rate by decision",
+      "id": 8,
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(proxy_requests_total[5m])) by (decision)", "legendFormat": "{{decision}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Proxy p95 latency (s)",
+      "id": 9,
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(proxy_request_duration_seconds_bucket[5m])) by (le, decision))", "legendFormat": "p95 {{decision}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Panic-relax events",
+      "id": 10,
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 6},
+      "targets": [
+        {"expr": "sum(increase(seenoevil_panic_events_total[1h])) by (event)", "legendFormat": "{{event}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Notifications sent",
+      "id": 11,
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 6},
+      "targets": [
+        {"expr": "sum(rate(seenoevil_notifications_total[5m])) by (channel, status)", "legendFormat": "{{channel}}/{{status}}"}
+      ]
     }
   ]
 }

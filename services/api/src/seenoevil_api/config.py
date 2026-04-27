@@ -188,9 +188,40 @@ class AuthBuiltinConfig(_Base):
     admin_email: str = "admin@example.local"
 
 
+class OIDCConfig(_Base):
+    """Optional OpenID Connect single sign-on.
+
+    Validation flow: Authorization Code + PKCE. The API redirects the admin
+    browser to ``issuer``'s authorization endpoint, then exchanges the
+    returned code for an access token, then calls the ``userinfo`` endpoint
+    to read the verified email. If ``allowed_emails`` is non-empty, only those
+    emails may sign in (built-in admin remains as break-glass).
+
+    All endpoint URLs are derived from the issuer's ``.well-known/openid-configuration``
+    document fetched at first sign-in and cached in memory.
+    """
+
+    enabled: bool = False
+    issuer: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    redirect_url: str | None = None
+    allowed_emails: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "email", "profile"])
+
+    @model_validator(mode="after")
+    def _check(self) -> OIDCConfig:
+        if self.enabled and (not self.issuer or not self.client_id):
+            raise ValueError(
+                "auth.oidc.issuer and client_id are required when auth.oidc.enabled = true"
+            )
+        return self
+
+
 class AuthConfig(_Base):
     builtin: AuthBuiltinConfig = Field(default_factory=AuthBuiltinConfig)
-    # OIDC and WebAuthn are accepted but not consumed by M1.1.
+    oidc: OIDCConfig = Field(default_factory=OIDCConfig)
+    # WebAuthn is accepted but not consumed by M1.1.
 
 
 class AuditObservabilityConfig(_Base):
@@ -208,6 +239,44 @@ class ScannerConfig(_Base):
     interval: str = "1h"
 
 
+class NotificationsConfig(_Base):
+    """Outbound notification targets for block events and panic-mode changes.
+
+    All fields are optional. When all are unset, the API skips notification
+    fan-out entirely (no outbound HTTP). The ``notifier`` container is the
+    only egress-allowed surface aside from ``updater``.
+    """
+
+    enabled: bool = True
+    ntfy_url: str | None = None
+    webhook_url: str | None = None
+    webhook_token: str | None = None
+    timeout_seconds: float = 5.0
+
+
+class BackupConfig(_Base):
+    """Local snapshot scheduling for the SQLite policy DB and CA material.
+
+    For HA / streaming replication, set ``litestream.enabled = true`` and
+    point Litestream at an S3-compatible target (see ``deploy/compose``).
+    """
+
+    local_path: str = "/data/backups"
+    interval: str = "24h"
+    retention: int = 14
+
+
+class LitestreamConfig(_Base):
+    enabled: bool = False
+    replica_url: str | None = None  # e.g. s3://bucket/path
+
+    @model_validator(mode="after")
+    def _check(self) -> LitestreamConfig:
+        if self.enabled and not self.replica_url:
+            raise ValueError("litestream.replica_url is required when litestream.enabled = true")
+        return self
+
+
 class AppConfig(_Base):
     pod: PodConfig = Field(default_factory=PodConfig)
     db: DBConfig = Field(default_factory=DBConfig)
@@ -218,6 +287,9 @@ class AppConfig(_Base):
     devices: DevicesConfig = Field(default_factory=DevicesConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
+    litestream: LitestreamConfig = Field(default_factory=LitestreamConfig)
 
     @model_validator(mode="after")
     def _check_profiles_unique(self) -> AppConfig:
