@@ -106,7 +106,7 @@ jobs:
         working-directory: services/proxy
         run: go test ./...
 
-
+  opa:
     name: OPA (rego)
     runs-on: ubuntu-latest
     steps:
