@@ -19,7 +19,7 @@ RUN pip install --upgrade pip \
 
 COPY services/text-classifier/pyproject.toml ./
 COPY services/text-classifier/src/ ./src/
-RUN pip install --prefix=/install ".[]"
+RUN pip install --prefix=/install "."
 
 COPY shared/proto/classify.proto /proto/classify.proto
 RUN python -m grpc_tools.protoc \

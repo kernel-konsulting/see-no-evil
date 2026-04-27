@@ -47,7 +47,7 @@ RUN go mod download
 COPY --from=proto /src/gen ./gen
 COPY services/proxy/ .
 
-RUN go build -trimpath -ldflags="-s -w" -o /proxy ./...
+RUN go build -trimpath -ldflags="-s -w" -o /proxy .
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime

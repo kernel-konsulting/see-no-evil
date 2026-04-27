@@ -14,7 +14,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /build
 COPY services/updater/pyproject.toml ./
 COPY services/updater/src/ ./src/
-RUN pip install --upgrade pip && pip install --prefix=/install ".[]"
+RUN pip install --upgrade pip && pip install --prefix=/install "."
 
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
