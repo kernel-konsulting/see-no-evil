@@ -45,7 +45,7 @@ def test_deny_domain_blocks() -> None:
         _inp(url="https://www.tiktok.com/foo"),
     )
     assert out.decision == "block"
-    assert out.reason == "deny_domain"
+    assert out.reason == "deny_domain:tiktok.com"
 
 
 def test_wildcard_deny() -> None:
@@ -56,13 +56,29 @@ def test_wildcard_deny() -> None:
     assert out.decision == "block"
 
 
-def test_allow_list_is_exclusive() -> None:
+def test_allow_list_is_an_override_by_default() -> None:
     p = _profile(allow_domains=["khanacademy.org"])
     assert decide(p, _inp(url="https://khanacademy.org")).decision == "allow"
     assert decide(p, _inp(url="https://www.khanacademy.org/x")).decision == "allow"
     out = decide(p, _inp(url="https://example.com/"))
+    assert out.decision == "allow"
+
+
+def test_allow_list_override_skips_classifier_threshold() -> None:
+    p = _profile(allow_domains=["khanacademy.org"], image_thresholds={"porn": 0.4})
+    out = decide(
+        p,
+        _inp(url="https://khanacademy.org/lesson", classifier_scores={"porn": 0.99}),
+    )
+    assert out.decision == "allow"
+    assert out.reason == "allow_domain:khanacademy.org"
+
+
+def test_allow_list_can_be_enforced() -> None:
+    p = _profile(allow_domains=["khanacademy.org"], enforce_allowlist=True)
+    out = decide(p, _inp(url="https://example.com/"))
     assert out.decision == "block"
-    assert out.reason == "not_in_allowlist"
+    assert out.reason == "not_in_allowlist:example.com"
 
 
 def test_classifier_threshold_blocks() -> None:
@@ -133,7 +149,7 @@ def test_deny_wins_over_allow_list() -> None:
     p = _profile(allow_domains=["example.com"], deny_domains=["example.com"])
     out = decide(p, _inp(url="https://example.com/"))
     assert out.decision == "block"
-    assert out.reason == "deny_domain"
+    assert out.reason == "deny_domain:example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -145,14 +161,14 @@ def test_url_keyword_block() -> None:
     p = _profile(deny_url_keywords=["nsfw", "adult"])
     out = decide(p, _inp(url="https://example.com/category/Nsfw/page"))
     assert out.decision == "block"
-    assert out.reason == "deny_keyword"
+    assert out.reason == "deny_keyword:nsfw"
 
 
 def test_url_keyword_query_match() -> None:
     p = _profile(deny_url_keywords=["xxx"])
     out = decide(p, _inp(url="https://search.example/?q=xxx"))
     assert out.decision == "block"
-    assert out.reason == "deny_keyword"
+    assert out.reason == "deny_keyword:xxx"
 
 
 def test_url_keyword_no_match_allows() -> None:

@@ -158,6 +158,20 @@ class TextClassifierServicer(classify_pb2_grpc.TextClassifierServicer):  # type:
         _classify_total.labels(action=classify_pb2.Action.Name(action)).inc()
         _classify_latency.observe(time.perf_counter() - t0)
 
+        top = sorted(scores_map.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        top_str = ", ".join(f"{k}={v:.3f}" for k, v in top)
+        action_name = classify_pb2.Action.Name(action)
+        if action == classify_pb2.ACTION_BLOCK:
+            log.info(
+                "text classify: %s reason=%s top=[%s] %dms",
+                action_name,
+                reason,
+                top_str,
+                latency_ms,
+            )
+        else:
+            log.debug("text classify: %s top=[%s] %dms", action_name, top_str, latency_ms)
+
         return classify_pb2.ClassifyTextResponse(
             scores=[classify_pb2.Score(label=k, value=v) for k, v in scores_map.items()],
             action=action,
@@ -167,10 +181,12 @@ class TextClassifierServicer(classify_pb2_grpc.TextClassifierServicer):  # type:
 
 
 def serve() -> None:
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    log.info("log level: %s", log_level)
 
     for path, name in [(MODEL_PATH, "model"), (TOKENIZER_PATH, "tokenizer")]:
         if not path.exists():

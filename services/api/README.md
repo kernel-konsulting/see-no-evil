@@ -16,6 +16,9 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 - Built-in admin auth: argon2 password + HS256 session cookie.
 - Minimal Python policy engine (URL allow/deny + classifier thresholds +
   schedule windows + daily quota).
+- Block reasons name the matched rule where possible, e.g.
+  `deny_domain:tiktok.com`, `deny_keyword:casino`, or
+  `classifier:image:porn`.
 - Endpoints:
   - `GET  /healthz`
   - `GET  /readyz`
@@ -26,7 +29,7 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   - `GET/POST/PATCH/DELETE /v1/profiles[/{id}]` (admin)
   - `GET/POST/PATCH/DELETE /v1/devices[/{id}]` (admin)
   - `POST /v1/devices/discover` (M1.6 — scanner upserts MAC list)
-  - `GET  /v1/audit` (admin)
+  - `GET/DELETE /v1/audit` (admin; list or clear audit entries)
   - `POST /v1/decide` (called by the proxy)
   - `GET/POST/DELETE /v1/quarantine[/{id}[/allow|/deny]]` (admin; M3 quarantine queue)
 
@@ -34,6 +37,9 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 
 - URL keyword filter (`profiles.*.deny.url_keywords`).
 - YouTube channel allow/deny rules with handle/ID extraction.
+- Profile and global allow domains are explicit allow overrides by default.
+  Default-deny allowlist mode is available only through the advanced
+  `enforce_allowlist` / `enforce_global_allowlist` switches.
 
 **M3 additions:**
 

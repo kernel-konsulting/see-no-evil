@@ -3,6 +3,7 @@ package sampler_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -41,6 +42,15 @@ func (f *fakeImageClassifier) Classify(_ context.Context, req *classifyv1.Classi
 		Action: action,
 		Reason: "fake",
 	}, nil
+}
+
+type failingImageClassifier struct {
+	calls int
+}
+
+func (f *failingImageClassifier) Classify(_ context.Context, _ *classifyv1.ClassifyImageRequest, _ ...grpc.CallOption) (*classifyv1.ClassifyImageResponse, error) {
+	f.calls++
+	return nil, errors.New("classifier unavailable")
 }
 
 // writeFakeFFmpeg drops a tiny shell script that ignores its inputs and
@@ -214,6 +224,48 @@ func TestSampleFramesAllowWhenNoneFlagged(t *testing.T) {
 	}
 	if resp.FramesScored != 3 {
 		t.Errorf("expected 3 frames scored, got %d", resp.FramesScored)
+	}
+}
+
+func TestSampleReportsFailureWhenNoFramesClassified(t *testing.T) {
+	tmp := t.TempDir()
+	cleanFrame := makeJPEG(t, 0x00)
+	fake := writeFakeFFmpeg(t, tmp, 3, cleanFrame)
+
+	imgClient := &failingImageClassifier{}
+	srv := sampler.NewServer(sampler.Config{
+		Image:         imgClient,
+		DefaultFrames: 3,
+		MaxVideoBytes: 1 << 20,
+		FFmpegPath:    fake,
+	})
+	client, cleanup := startGRPC(t, srv)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := client.Sample(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	_ = stream.Send(&classifyv1.SampleVideoRequest{RequestId: "req-fail", Chunk: []byte("data")})
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+
+	if resp.Action != classifyv1.Action_ACTION_ALLOW {
+		t.Errorf("expected sampler to report allow with failure reason, got %s", resp.Action)
+	}
+	if resp.Reason != "video_sampler:classification_failed" {
+		t.Errorf("unexpected reason: %q", resp.Reason)
+	}
+	if resp.FramesScored != 0 {
+		t.Errorf("expected 0 frames scored, got %d", resp.FramesScored)
+	}
+	if imgClient.calls != 3 {
+		t.Errorf("expected 3 classifier calls, got %d", imgClient.calls)
 	}
 }
 

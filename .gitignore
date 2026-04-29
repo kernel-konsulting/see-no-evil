@@ -52,6 +52,8 @@ secrets/
 # Internal working docs
 PLAN.md
 *.key
+*.pem
+*.crt
 !docs/**/*.key
 .env
 .env.*

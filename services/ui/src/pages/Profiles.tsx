@@ -1,11 +1,22 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listProfiles, createProfile, updateProfile, deleteProfile } from "@/lib/api";
+import {
+  listProfiles,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+} from "@/lib/api";
 import type { Profile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
 import { Pencil, Trash2, Plus, ShieldCheck, ShieldOff } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 
@@ -18,6 +29,7 @@ type ProfileForm = {
   notify_on_block: boolean;
   image_thresholds: Record<string, number>;
   allow_domains: string[];
+  enforce_allowlist: boolean;
   deny_domains: string[];
   deny_url_keywords: string[];
   allow_youtube_channels: string[];
@@ -31,6 +43,7 @@ const defaultForm: ProfileForm = {
   notify_on_block: false,
   image_thresholds: { porn: 0.6, hentai: 0.6, sexy: 0.9 },
   allow_domains: [],
+  enforce_allowlist: false,
   deny_domains: [],
   deny_url_keywords: [],
   allow_youtube_channels: [],
@@ -45,6 +58,7 @@ function profileToForm(p: Profile): ProfileForm {
     notify_on_block: p.notify_on_block,
     image_thresholds: { ...p.image_thresholds },
     allow_domains: [...(p.allow_domains ?? [])],
+    enforce_allowlist: p.enforce_allowlist,
     deny_domains: [...(p.deny_domains ?? [])],
     deny_url_keywords: [...(p.deny_url_keywords ?? [])],
     allow_youtube_channels: [...(p.allow_youtube_channels ?? [])],
@@ -60,6 +74,7 @@ function formToPayload(f: ProfileForm): Partial<Profile> & { name: string } {
     notify_on_block: f.notify_on_block,
     image_thresholds: f.image_thresholds,
     allow_domains: f.allow_domains,
+    enforce_allowlist: f.enforce_allowlist,
     deny_domains: f.deny_domains,
     deny_url_keywords: f.deny_url_keywords,
     allow_youtube_channels: f.allow_youtube_channels,
@@ -140,7 +155,9 @@ export default function Profiles() {
       {isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : profiles.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No profiles yet. Create one above.</p>
+        <p className="text-sm text-muted-foreground">
+          No profiles yet. Create one above.
+        </p>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {profiles.map((p) =>
@@ -150,7 +167,9 @@ export default function Profiles() {
                 title={`Edit — ${p.name}`}
                 values={form}
                 onChange={setForm}
-                onSave={() => updateMut.mutate({ id: p.id, payload: formToPayload(form) })}
+                onSave={() =>
+                  updateMut.mutate({ id: p.id, payload: formToPayload(form) })
+                }
                 onCancel={() => setEditingId(null)}
                 saving={updateMut.isPending}
               />
@@ -181,7 +200,8 @@ export default function Profiles() {
                       size="icon"
                       aria-label="Delete"
                       onClick={() => {
-                        if (confirm(`Delete profile "${p.name}"?`)) deleteMut.mutate(p.id);
+                        if (confirm(`Delete profile "${p.name}"?`))
+                          deleteMut.mutate(p.id);
                       }}
                     >
                       <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -189,7 +209,9 @@ export default function Profiles() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  <p className="text-muted-foreground">{p.description || "No description"}</p>
+                  <p className="text-muted-foreground">
+                    {p.description || "No description"}
+                  </p>
                   <Flag
                     on={p.quota_minutes_per_day > 0}
                     label={`Quota: ${p.quota_minutes_per_day} min/day`}
@@ -197,8 +219,8 @@ export default function Profiles() {
                   <Flag on={p.notify_on_block} label="Notify on block" />
                   <ThresholdSummary thresholds={p.image_thresholds} />
                   <div className="text-xs text-muted-foreground">
-                    {p.deny_domains.length} deny · {p.allow_domains.length} allow ·{" "}
-                    {p.deny_url_keywords.length} keyword
+                    {p.deny_domains.length} deny · {p.allow_domains.length}{" "}
+                    allow · {p.deny_url_keywords.length} keyword
                   </div>
                 </CardContent>
               </Card>
@@ -242,7 +264,9 @@ function ProfileFormCard({
           <Label>Description</Label>
           <Input
             value={values.description}
-            onChange={(e) => onChange({ ...values, description: e.target.value })}
+            onChange={(e) =>
+              onChange({ ...values, description: e.target.value })
+            }
           />
         </div>
         <div className="space-y-1">
@@ -252,7 +276,10 @@ function ProfileFormCard({
             min={0}
             value={values.quota_minutes_per_day}
             onChange={(e) =>
-              onChange({ ...values, quota_minutes_per_day: Number(e.target.value || 0) })
+              onChange({
+                ...values,
+                quota_minutes_per_day: Number(e.target.value || 0),
+              })
             }
           />
         </div>
@@ -261,7 +288,9 @@ function ProfileFormCard({
             type="checkbox"
             className="h-4 w-4"
             checked={values.notify_on_block}
-            onChange={(e) => onChange({ ...values, notify_on_block: e.target.checked })}
+            onChange={(e) =>
+              onChange({ ...values, notify_on_block: e.target.checked })
+            }
           />
           Notify on block
         </label>
@@ -269,7 +298,8 @@ function ProfileFormCard({
         <div className="space-y-2 pt-2 border-t">
           <Label className="text-base">Image classifier strictness</Label>
           <p className="text-xs text-muted-foreground">
-            Lower = stricter (blocks at lower confidence). 1.0 effectively disables the class.
+            Lower = stricter (blocks at lower confidence). 1.0 effectively
+            disables the class.
           </p>
           {IMAGE_LABELS.map((label) => (
             <ThresholdSlider
@@ -295,11 +325,25 @@ function ProfileFormCard({
             onChange={(v) => onChange({ ...values, deny_domains: v })}
           />
           <ListEditor
-            label="Allow domains (when set, only these pass)"
+            label="Always allow domains"
             values={values.allow_domains}
             placeholder="e.g. khanacademy.org"
             onChange={(v) => onChange({ ...values, allow_domains: v })}
           />
+          <label className="flex items-center gap-2 text-sm cursor-pointer rounded-md border border-dashed p-3">
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={values.enforce_allowlist}
+              onChange={(e) =>
+                onChange({ ...values, enforce_allowlist: e.target.checked })
+              }
+            />
+            <span>
+              Advanced: only allow domains listed above; block every other
+              domain.
+            </span>
+          </label>
           <ListEditor
             label="Deny URL keywords"
             values={values.deny_url_keywords}
@@ -426,10 +470,16 @@ function ListEditor({
   );
 }
 
-function ThresholdSummary({ thresholds }: { thresholds: Record<string, number> }) {
+function ThresholdSummary({
+  thresholds,
+}: {
+  thresholds: Record<string, number>;
+}) {
   const entries = Object.entries(thresholds);
   if (entries.length === 0) {
-    return <div className="text-xs text-muted-foreground">No thresholds set</div>;
+    return (
+      <div className="text-xs text-muted-foreground">No thresholds set</div>
+    );
   }
   return (
     <div className="text-xs text-muted-foreground">
@@ -446,8 +496,14 @@ function ThresholdSummary({ thresholds }: { thresholds: Record<string, number> }
 
 function Flag({ on, label }: { on: boolean; label: string }) {
   return (
-    <div className={`flex items-center gap-1.5 ${on ? "text-green-700" : "text-muted-foreground"}`}>
-      {on ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldOff className="h-3.5 w-3.5" />}
+    <div
+      className={`flex items-center gap-1.5 ${on ? "text-green-700" : "text-muted-foreground"}`}
+    >
+      {on ? (
+        <ShieldCheck className="h-3.5 w-3.5" />
+      ) : (
+        <ShieldOff className="h-3.5 w-3.5" />
+      )}
       {label}
     </div>
   );

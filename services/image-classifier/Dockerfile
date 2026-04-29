@@ -14,14 +14,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
-# Install grpcio-tools for protobuf code generation
-RUN pip install --upgrade pip \
- && pip install grpcio-tools==1.67.1 protobuf==5.29.2
-
 # Copy and install the service package
 COPY services/image-classifier/pyproject.toml ./
 COPY services/image-classifier/src/ ./src/
-RUN pip install --prefix=/install "."
+RUN pip install --upgrade pip \
+ && pip install --prefix=/install "." \
+ && pip install grpcio-tools==1.67.1 protobuf==5.29.2
 
 # Generate gRPC stubs from the shared proto into the installed package
 COPY shared/proto/classify.proto /proto/classify.proto
@@ -41,7 +39,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/lib/python3.12/site-packages
 
 RUN groupadd --system --gid 10001 app \
- && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app
+ && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app \
+ && apt-get update -qq \
+ && apt-get install -y -q --no-install-recommends libcairo2 \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /install /app

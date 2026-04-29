@@ -10,6 +10,9 @@ import Devices from "@/pages/Devices";
 import Profiles from "@/pages/Profiles";
 import Quarantine from "@/pages/Quarantine";
 import AuditLog from "@/pages/AuditLog";
+import Setup from "@/pages/Setup";
+import SettingsPage from "@/pages/Settings";
+import Users from "@/pages/Users";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,6 +26,15 @@ const queryClient = new QueryClient({
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { authenticated } = useAuth();
   return authenticated ? <>{children}</> : <Navigate to="/login" replace />;
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { authenticated, role, me } = useAuth();
+  if (!authenticated) return <Navigate to="/login" replace />;
+  // Wait for role to load before deciding (avoids a redirect flash).
+  if (me === null) return null;
+  if (role !== "admin") return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
 }
 
 export default function App() {
@@ -42,10 +54,55 @@ export default function App() {
             >
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
-              <Route path="devices" element={<Devices />} />
-              <Route path="profiles" element={<Profiles />} />
-              <Route path="quarantine" element={<Quarantine />} />
+              <Route
+                path="quarantine"
+                element={
+                  <AdminRoute>
+                    <Quarantine />
+                  </AdminRoute>
+                }
+              />
               <Route path="audit" element={<AuditLog />} />
+              <Route
+                path="devices"
+                element={
+                  <AdminRoute>
+                    <Devices />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="profiles"
+                element={
+                  <AdminRoute>
+                    <Profiles />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="settings"
+                element={
+                  <AdminRoute>
+                    <SettingsPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="users"
+                element={
+                  <AdminRoute>
+                    <Users />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="setup"
+                element={
+                  <AdminRoute>
+                    <Setup />
+                  </AdminRoute>
+                }
+              />
             </Route>
           </Routes>
           <Toaster />

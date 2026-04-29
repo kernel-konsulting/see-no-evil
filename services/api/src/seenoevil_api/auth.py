@@ -17,9 +17,10 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Cookie, Depends, HTTPException, Response, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Setting
+from .models import Setting, User
 
 SESSION_COOKIE = "seenoevil_session"
 SESSION_TTL = timedelta(hours=12)
@@ -28,6 +29,13 @@ JWT_ALG = "HS256"
 _PWD_KEY = "auth.admin_password_hash"
 _EMAIL_KEY = "auth.admin_email"
 _JWT_KEY = "auth.jwt_secret"
+
+# Recognised role values. ``viewer`` users get read-only access to the audit
+# log + quarantine queue and may flag items as false positives, but cannot
+# mutate policy/devices/profiles or allow/deny quarantine items.
+ROLE_ADMIN = "admin"
+ROLE_VIEWER = "viewer"
+VALID_ROLES = frozenset({ROLE_ADMIN, ROLE_VIEWER})
 
 _hasher = PasswordHasher()
 
@@ -65,29 +73,112 @@ def _ensure_jwt_secret(session: Session) -> str:
 
 
 def set_admin_password(session: Session, email: str, password: str) -> None:
-    """Hash and store the admin password. Idempotent."""
-    if not password or len(password) < 8:
-        raise ValueError("password must be at least 8 characters")
-    _set_setting(session, _PWD_KEY, _hasher.hash(password))
-    _set_setting(session, _EMAIL_KEY, email)
+    """Hash and store the admin password. Idempotent.
+
+    Writes to BOTH the legacy settings rows (so older lookups still work) and
+    the new ``users`` table (so multi-user features see the bootstrap admin).
+    """
+    norm = email.strip().lower()
+    pwd_hash = hash_password(password)
+    _set_setting(session, _PWD_KEY, pwd_hash)
+    _set_setting(session, _EMAIL_KEY, norm)
+    user = session.scalars(select(User).where(User.email == norm)).first()
+    if user is None:
+        session.add(User(email=norm, password_hash=pwd_hash, role=ROLE_ADMIN))
+    else:
+        user.password_hash = pwd_hash
+        user.role = ROLE_ADMIN
+        user.disabled = False
 
 
 def admin_is_configured(session: Session) -> bool:
-    return bool(_get_setting(session, _PWD_KEY))
+    if _get_setting(session, _PWD_KEY):
+        return True
+    return session.scalars(select(User).limit(1)).first() is not None
 
 
 def verify_admin(session: Session, email: str, password: str) -> bool:
+    norm = email.strip().lower()
+    # Prefer the multi-user table.
+    user = session.scalars(select(User).where(User.email == norm)).first()
+    if user is not None and not user.disabled:
+        try:
+            _hasher.verify(user.password_hash, password)
+            return True
+        except VerifyMismatchError:
+            return False
+    # Fallback: legacy single-admin row in the settings table.
     stored_email = _get_setting(session, _EMAIL_KEY)
     stored_hash = _get_setting(session, _PWD_KEY)
     if not stored_email or not stored_hash:
         return False
-    if email.strip().lower() != str(stored_email).strip().lower():
+    if norm != str(stored_email).strip().lower():
         return False
     try:
         _hasher.verify(stored_hash, password)
     except VerifyMismatchError:
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Multi-user helpers
+# ---------------------------------------------------------------------------
+
+
+def hash_password(password: str) -> str:
+    if not password or len(password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    return _hasher.hash(password)
+
+
+def list_users(session: Session) -> list[User]:
+    return list(session.scalars(select(User).order_by(User.email)).all())
+
+
+def create_user(session: Session, email: str, password: str, role: str = ROLE_ADMIN) -> User:
+    norm = email.strip().lower()
+    if not norm or "@" not in norm:
+        raise ValueError("email must contain '@'")
+    if role not in VALID_ROLES:
+        raise ValueError(f"role must be one of {sorted(VALID_ROLES)}")
+    if session.scalars(select(User).where(User.email == norm)).first() is not None:
+        raise ValueError("user already exists")
+    user = User(email=norm, password_hash=hash_password(password), role=role)
+    session.add(user)
+    session.commit()
+    return user
+
+
+def update_user(
+    session: Session,
+    user_id: int,
+    *,
+    password: str | None = None,
+    role: str | None = None,
+    disabled: bool | None = None,
+) -> User:
+    user = session.get(User, user_id)
+    if user is None:
+        raise ValueError("user not found")
+    if password is not None:
+        user.password_hash = hash_password(password)
+    if role is not None:
+        if role not in VALID_ROLES:
+            raise ValueError(f"role must be one of {sorted(VALID_ROLES)}")
+        user.role = role
+    if disabled is not None:
+        user.disabled = disabled
+    session.commit()
+    return user
+
+
+def delete_user(session: Session, user_id: int) -> None:
+    user = session.get(User, user_id)
+    if user is None:
+        return
+    session.delete(user)
+    session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +237,50 @@ def require_admin_factory(get_session_dep):
         sub = payload.get("sub")
         if not sub:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+        # Block non-admin roles. Legacy single-admin (no User row) defaults to admin.
+        user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
+        if user is not None and user.role != ROLE_ADMIN:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
         return str(sub)
+
+    return _dep
+
+
+def current_user_factory(get_session_dep):
+    """Build a dependency that returns the current logged-in user (any role).
+
+    Returns a ``(email, role)`` tuple. Callers that only need to know the
+    user is authenticated can ignore ``role``.
+    """
+
+    def _dep(
+        session: Session = Depends(get_session_dep),
+        token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+    ) -> tuple[str, str]:
+        if not token:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not authenticated")
+        payload = _decode(session, token)
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+        email = str(sub).lower()
+        user = session.scalars(select(User).where(User.email == email)).first()
+        if user is None:
+            # Legacy single-admin path: treat as admin.
+            return (email, ROLE_ADMIN)
+        if user.disabled:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "user disabled")
+        return (user.email, user.role)
+
+    return _dep
+
+
+def require_user_factory(get_session_dep):
+    """Build a dependency that requires *any* authenticated user."""
+
+    inner = current_user_factory(get_session_dep)
+
+    def _dep(current: tuple[str, str] = Depends(inner)) -> tuple[str, str]:
+        return current
 
     return _dep

@@ -1,35 +1,56 @@
-"""Read-only audit log query."""
+"""Audit log query and maintenance endpoints."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..models import AuditDecision
 from ..schemas import AuditOut
 
 
-def make_router(get_session_dep, require_admin) -> APIRouter:
+def make_router(get_session_dep, require_user) -> APIRouter:
     r = APIRouter(prefix="/v1/audit", tags=["audit"])
 
-    @r.get("", response_model=list[AuditOut], dependencies=[Depends(require_admin)])
+    @r.get("", response_model=list[AuditOut], dependencies=[Depends(require_user)])
     def list_audit(
         session: Session = Depends(get_session_dep),
         device_id: int | None = Query(default=None),
         decision: str | None = Query(default=None, pattern="^(allow|block)$"),
         since: datetime | None = Query(default=None),
+        # Cursor-based pagination: pass the smallest id from the previous page
+        # to fetch the next chunk. ``limit`` is the page size.
+        before_id: int | None = Query(default=None, ge=1),
         limit: int = Query(default=100, ge=1, le=1000),
     ) -> list[AuditDecision]:
-        stmt = select(AuditDecision).order_by(AuditDecision.ts.desc()).limit(limit)
+        stmt = select(AuditDecision).order_by(AuditDecision.id.desc())
         if device_id is not None:
             stmt = stmt.where(AuditDecision.device_id == device_id)
         if decision is not None:
             stmt = stmt.where(AuditDecision.decision == decision)
         if since is not None:
             stmt = stmt.where(AuditDecision.ts >= since)
-        return list(session.scalars(stmt))
+        if before_id is not None:
+            stmt = stmt.where(AuditDecision.id < before_id)
+        return list(session.scalars(stmt.limit(limit)))
+
+    @r.delete(
+        "",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
+    def clear_audit(
+        session: Session = Depends(get_session_dep),
+        current: tuple[str, str] = Depends(require_user),
+    ) -> Response:
+        _, role = current
+        if role != "admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
+        session.execute(delete(AuditDecision))
+        session.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return r

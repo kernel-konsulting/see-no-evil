@@ -6,6 +6,7 @@ import {
   updateDevice,
   deleteDevice,
   createDevice,
+  scanNetwork,
 } from "@/lib/api";
 import type { Device } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Pencil, Trash2, Plus } from "lucide-react";
+import { Pencil, Trash2, Plus, Radar, Loader2 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 
 export default function Devices() {
@@ -74,14 +75,55 @@ export default function Devices() {
     onError: () => toast({ title: "Create failed", variant: "destructive" }),
   });
 
+  const scanMut = useMutation({
+    mutationFn: scanNetwork,
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      const found = result.devices_found ?? 0;
+      const created = result.devices_created ?? 0;
+      toast({
+        title: `Scan complete (${result.duration_seconds ?? 0}s on ${result.cidr ?? "?"})`,
+        description:
+          result.note ??
+          `Found ${found} device${found === 1 ? "" : "s"}; ${created} new.`,
+        duration: result.note ? 15_000 : 5_000,
+      });
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data
+          ?.detail ?? String(err);
+      toast({
+        title: "Scan failed",
+        description: msg,
+        variant: "destructive",
+      });
+    },
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Devices</h1>
-        <Button size="sm" onClick={() => setAdding(true)}>
-          <Plus className="h-4 w-4 mr-1" />
-          Add device
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => scanMut.mutate()}
+            disabled={scanMut.isPending}
+          >
+            {scanMut.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+            ) : (
+              <Radar className="h-4 w-4 mr-1" />
+            )}
+            {scanMut.isPending ? "Scanning…" : "Scan network"}
+          </Button>
+          <Button size="sm" onClick={() => setAdding(true)}>
+            <Plus className="h-4 w-4 mr-1" />
+            Add device
+          </Button>
+        </div>
       </div>
 
       {/* Add form */}

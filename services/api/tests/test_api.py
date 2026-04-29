@@ -38,6 +38,8 @@ def test_control_plane_reads_require_admin(client: TestClient) -> None:
 def test_control_plane_writes_require_admin(client: TestClient) -> None:
     r = client.post("/v1/profiles", json={"name": "blocked"})
     assert r.status_code == 401
+    r = client.delete("/v1/audit")
+    assert r.status_code == 401
 
 
 def test_profile_crud_round_trip(admin_client: TestClient) -> None:
@@ -100,7 +102,43 @@ def test_decide_unknown_device_uses_default_profile(client: TestClient) -> None:
     body = r.json()
     assert body["decision"] == "allow"
     assert body["profile"] == "guests"
-    assert body["device_id"] is None
+    # Auto-discovery: a Device row is created on first contact.
+    assert isinstance(body["device_id"], int) and body["device_id"] > 0
+
+
+def test_decide_auto_creates_device_row(admin_client: TestClient) -> None:
+    mac = "aa:bb:cc:00:11:22"
+    r = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://example.com", "device_mac": mac},
+    )
+    assert r.status_code == 200, r.text
+    devices = admin_client.get("/v1/devices").json()
+    matched = [d for d in devices if d["mac"] == mac]
+    assert len(matched) == 1
+    assert matched[0]["name"].startswith("auto-")
+
+
+def test_decide_auto_creates_device_from_ip(admin_client: TestClient) -> None:
+    r = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://example.com", "client_ip": "192.168.1.50"},
+    )
+    assert r.status_code == 200, r.text
+    devices = admin_client.get("/v1/devices").json()
+    matched = [d for d in devices if d["ip"] == "192.168.1.50"]
+    assert len(matched) == 1
+    assert matched[0]["mac"] == "02:00:c0:a8:01:32"
+    assert matched[0]["name"] == "auto-192.168.1.50"
+
+    # Same IP again -> no duplicate device, last_seen updated.
+    r2 = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://example.com/2", "client_ip": "192.168.1.50"},
+    )
+    assert r2.status_code == 200
+    devices = admin_client.get("/v1/devices").json()
+    assert len([d for d in devices if d["ip"] == "192.168.1.50"]) == 1
 
 
 def test_decide_known_device_blocks_on_deny(admin_client: TestClient) -> None:
@@ -117,12 +155,102 @@ def test_decide_known_device_blocks_on_deny(admin_client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["decision"] == "block"
-    assert body["reason"] == "deny_domain"
+    assert body["reason"] == "deny_domain:tiktok.com"
     assert body["profile"] == "kids"
 
     # And a row landed in the audit log.
     audit = admin_client.get("/v1/audit").json()
     assert any(row["url"] == "https://www.tiktok.com/foo" for row in audit)
+
+
+def test_global_allow_is_override_not_default_deny(admin_client: TestClient) -> None:
+    r = admin_client.put(
+        "/v1/settings",
+        json={"lists": {"global_allow_domains": ["example.edu"]}},
+    )
+    assert r.status_code == 200, r.text
+
+    allowed = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://example.edu/class", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    ).json()
+    assert allowed["decision"] == "allow"
+    assert allowed["reason"] == "global_allow_domain:example.edu"
+
+    other = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://victoriassecret.com/", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    ).json()
+    assert other["decision"] == "allow"
+
+
+def test_global_allowlist_requires_explicit_enforcement(admin_client: TestClient) -> None:
+    r = admin_client.put(
+        "/v1/settings",
+        json={
+            "lists": {
+                "global_allow_domains": ["example.edu"],
+                "enforce_global_allowlist": True,
+            }
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    blocked = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://victoriassecret.com/", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    ).json()
+    assert blocked["decision"] == "block"
+    assert blocked["reason"] == "global_not_in_allowlist:victoriassecret.com"
+
+
+def test_domain_and_url_toggles_are_separate(admin_client: TestClient) -> None:
+    r = admin_client.put(
+        "/v1/settings",
+        json={
+            "inspect": {"domain": False, "url": True},
+            "lists": {
+                "global_deny_domains": ["blocked.example"],
+                "global_deny_keywords": ["badterm"],
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    domain_allowed = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://blocked.example/", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    ).json()
+    assert domain_allowed["decision"] == "allow"
+
+    keyword_blocked = admin_client.post(
+        "/v1/decide",
+        json={
+            "url": "https://google.com/search?q=badterm",
+            "device_mac": "ff:ff:ff:ff:ff:ff",
+        },
+    ).json()
+    assert keyword_blocked["decision"] == "block"
+    assert keyword_blocked["reason"] == "global_deny_keyword:badterm"
+
+    r = admin_client.put("/v1/settings", json={"inspect": {"domain": True, "url": False}})
+    assert r.status_code == 200, r.text
+
+    domain_blocked = admin_client.post(
+        "/v1/decide",
+        json={"url": "https://blocked.example/", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    ).json()
+    assert domain_blocked["decision"] == "block"
+    assert domain_blocked["reason"] == "global_deny_domain:blocked.example"
+
+    keyword_allowed = admin_client.post(
+        "/v1/decide",
+        json={
+            "url": "https://google.com/search?q=badterm",
+            "device_mac": "ff:ff:ff:ff:ff:ff",
+        },
+    ).json()
+    assert keyword_allowed["decision"] == "allow"
 
 
 def test_audit_filters(admin_client: TestClient) -> None:
@@ -139,6 +267,18 @@ def test_audit_filters(admin_client: TestClient) -> None:
     assert r.status_code == 200
     rows = r.json()
     assert all(row["decision"] == "allow" for row in rows)
+
+
+def test_clear_audit(admin_client: TestClient) -> None:
+    admin_client.post(
+        "/v1/decide",
+        json={"url": "https://example.com/clear-me", "device_mac": "ff:ff:ff:ff:ff:ff"},
+    )
+    assert admin_client.get("/v1/audit").json()
+
+    r = admin_client.delete("/v1/audit")
+    assert r.status_code == 204
+    assert admin_client.get("/v1/audit").json() == []
 
 
 def test_auth_setup_only_once(client: TestClient) -> None:
@@ -199,6 +339,32 @@ def test_quarantine_created_on_classifier_block(admin_client: TestClient) -> Non
     assert item["reason"] == "classifier:porn"
 
 
+def test_proxy_forced_block_reason_is_audited_and_quarantined(admin_client: TestClient) -> None:
+    r = admin_client.post(
+        "/v1/decide",
+        json={
+            "url": "https://example.com/proxy-blocked.jpg",
+            "content_type": "image/jpeg",
+            "device_mac": "ff:ff:ff:ff:ff:ff",
+            "classifier_scores": {"image:porn": 0.99},
+            "decision": "block",
+            "reason": "classifier:image:porn",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["decision"] == "block"
+    assert r.json()["reason"] == "classifier:image:porn"
+
+    audit = admin_client.get("/v1/audit").json()
+    row = next(a for a in audit if a["url"] == "https://example.com/proxy-blocked.jpg")
+    assert row["decision"] == "block"
+    assert row["reason"] == "classifier:image:porn"
+
+    items = admin_client.get("/v1/quarantine").json()
+    item = next(q for q in items if q["url"] == "https://example.com/proxy-blocked.jpg")
+    assert item["reason"] == "classifier:image:porn"
+
+
 def test_quarantine_not_created_for_domain_block(admin_client: TestClient) -> None:
     profiles = admin_client.get("/v1/profiles").json()
     kids_id = next(p["id"] for p in profiles if p["name"] == "kids")
@@ -252,6 +418,26 @@ def test_quarantine_allow_and_deny_lifecycle(admin_client: TestClient) -> None:
     assert again.status_code == 409
 
 
+def test_quarantine_bulk_allow_and_deny(admin_client: TestClient) -> None:
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+
+    r = admin_client.post("/v1/quarantine/bulk-allow", json={})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"updated": 2}
+    assert admin_client.get("/v1/quarantine").json() == []
+
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    _seed_image_block(admin_client, scores={"porn": 0.99})
+    pending = admin_client.get("/v1/quarantine").json()
+    selected_id = pending[0]["id"]
+
+    r = admin_client.post("/v1/quarantine/bulk-deny", json={"ids": [selected_id]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"updated": 1}
+    assert len(admin_client.get("/v1/quarantine").json()) == 1
+
+
 def test_quarantine_filter_by_status(admin_client: TestClient) -> None:
     _seed_image_block(admin_client, scores={"porn": 0.99})
     item_id = admin_client.get("/v1/quarantine").json()[0]["id"]
@@ -275,6 +461,26 @@ def test_quarantine_admin_only(client: TestClient) -> None:
     assert client.get("/v1/quarantine").status_code == 401
     assert client.get("/v1/quarantine/1").status_code == 401
     assert client.post("/v1/quarantine/1/allow").status_code == 401
+
+
+def test_quarantine_viewer_forbidden(client: TestClient) -> None:
+    client.post("/v1/auth/setup", json={"email": "admin@example.local", "password": "hunter22!"})
+    client.post("/v1/auth/login", json={"email": "admin@example.local", "password": "hunter22!"})
+    r = client.post(
+        "/v1/users",
+        json={"email": "viewer@example.local", "password": "viewer22!", "role": "viewer"},
+    )
+    assert r.status_code == 201, r.text
+    client.post("/v1/auth/logout")
+    r = client.post(
+        "/v1/auth/login",
+        json={"email": "viewer@example.local", "password": "viewer22!"},
+    )
+    assert r.status_code == 200, r.text
+
+    assert client.get("/v1/quarantine").status_code == 403
+    assert client.get("/v1/quarantine/1").status_code == 403
+    assert client.post("/v1/quarantine/1/flag", json={"note": "maybe safe"}).status_code == 403
 
 
 def test_quarantine_delete(admin_client: TestClient) -> None:

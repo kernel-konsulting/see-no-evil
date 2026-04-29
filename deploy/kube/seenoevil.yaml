@@ -1,0 +1,261 @@
+# =============================================================================
+# see-no-evil — single-pod Kubernetes manifest for `podman kube play`.
+#
+# Apply / remove:
+#   podman kube play   deploy/kube/seenoevil.yaml
+#   podman kube down   deploy/kube/seenoevil.yaml
+#
+# This is the declarative equivalent of `deploy/pods/seenoevil.sh`.  All
+# containers run inside a single pod (`seenoevil`) and talk to each other over
+# 127.0.0.1.  Host ports use the rootless-friendly defaults from the script.
+#
+# To override a port, edit the matching `hostPort:` value below.  Container
+# ports must stay as-is (they are baked into each image).
+#
+# Volumes are PersistentVolumeClaims that podman-kube maps onto named volumes
+# of the same name (e.g. PVC `seenoevil-data` -> podman volume `seenoevil-data`).
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-proxy-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-dns-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-caddy-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-caddy-config
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seenoevil-tailscale-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: seenoevil
+  labels:
+    app: seenoevil
+spec:
+  hostname: seenoevil
+  restartPolicy: Always
+
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: seenoevil-data
+    - name: proxy-data
+      persistentVolumeClaim:
+        claimName: seenoevil-proxy-data
+    - name: dns-data
+      persistentVolumeClaim:
+        claimName: seenoevil-dns-data
+    - name: caddy-data
+      persistentVolumeClaim:
+        claimName: seenoevil-caddy-data
+    - name: caddy-config
+      persistentVolumeClaim:
+        claimName: seenoevil-caddy-config
+    - name: tailscale-state
+      persistentVolumeClaim:
+        claimName: seenoevil-tailscale-state
+    # Bind-mount the example config from the repo.  Replace with your own
+    # path (or convert to a ConfigMap) for production.
+    - name: config
+      hostPath:
+        path: ./config.example.yaml
+        type: File
+
+  containers:
+    # ── api ──────────────────────────────────────────────────────────────
+    - name: api
+      image: ghcr.io/kernel-konsulting/seenoevil-api:dev
+      env:
+        - name: SEENOEVIL_CONFIG
+          value: /etc/seenoevil/config.yaml
+        - name: SEENOEVIL_INITIAL_ADMIN_PASSWORD
+          # Change me before first start! Used only when no admin exists yet.
+          value: changeme
+        - name: SEENOEVIL_MITM_CA_PATH
+          value: /proxy-data/ca/ca.crt
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: proxy-data
+          mountPath: /proxy-data
+          readOnly: true
+        - name: config
+          mountPath: /etc/seenoevil/config.yaml
+          readOnly: true
+
+    # ── image-classifier ────────────────────────────────────────────────
+    - name: image-classifier
+      image: ghcr.io/kernel-konsulting/seenoevil-image-classifier:dev
+      volumeMounts:
+        - name: data
+          mountPath: /data
+
+    # ── text-classifier ─────────────────────────────────────────────────
+    - name: text-classifier
+      image: ghcr.io/kernel-konsulting/seenoevil-text-classifier:dev
+      volumeMounts:
+        - name: data
+          mountPath: /data
+
+    # ── video-sampler ───────────────────────────────────────────────────
+    - name: video-sampler
+      image: ghcr.io/kernel-konsulting/seenoevil-video-sampler:dev
+      env:
+        - name: IMAGE_CLASSIFIER_ADDR
+          value: 127.0.0.1:50051
+
+    # ── ui (nginx on :8081) ─────────────────────────────────────────────
+    - name: ui
+      image: ghcr.io/kernel-konsulting/seenoevil-ui:dev
+
+    # ── proxy ───────────────────────────────────────────────────────────
+    - name: proxy
+      image: ghcr.io/kernel-konsulting/seenoevil-proxy:dev
+      env:
+        - name: CONFIG_PATH
+          value: /etc/seenoevil/config.yaml
+        - name: IMAGE_CLASSIFIER_ADDR
+          value: 127.0.0.1:50051
+        - name: TEXT_CLASSIFIER_ADDR
+          value: 127.0.0.1:50052
+        - name: VIDEO_SAMPLER_ADDR
+          value: 127.0.0.1:50053
+        - name: API_ADDR
+          value: 127.0.0.1:8000
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+          protocol: TCP
+        - containerPort: 8443
+          hostPort: 8443
+          protocol: TCP
+      volumeMounts:
+        - name: proxy-data
+          mountPath: /data
+        - name: config
+          mountPath: /etc/seenoevil/config.yaml
+          readOnly: true
+
+    # ── dns (blocky) ────────────────────────────────────────────────────
+    - name: dns
+      image: ghcr.io/kernel-konsulting/seenoevil-dns:dev
+      ports:
+        - containerPort: 53
+          hostPort: 53
+          protocol: UDP
+        - containerPort: 53
+          hostPort: 53
+          protocol: TCP
+      volumeMounts:
+        - name: dns-data
+          mountPath: /data
+
+    # ── updater ─────────────────────────────────────────────────────────
+    - name: updater
+      image: ghcr.io/kernel-konsulting/seenoevil-updater:dev
+      env:
+        - name: SNE_UPDATE_INTERVAL
+          value: "86400"
+      volumeMounts:
+        - name: data
+          mountPath: /data
+
+    # ── caddy (admin reverse proxy) ─────────────────────────────────────
+    - name: caddy
+      image: ghcr.io/kernel-konsulting/seenoevil-caddy:dev
+      env:
+        - name: SNE_HOSTNAME
+          value: seenoevil.lan
+        - name: SNE_TLS_MODE
+          value: internal
+        - name: SNE_TLS_EMAIL
+          value: ""
+        - name: SNE_API_UPSTREAM
+          value: 127.0.0.1:8000
+        - name: SNE_UI_UPSTREAM
+          value: 127.0.0.1:8081
+      ports:
+        - containerPort: 80
+          hostPort: 8088
+          protocol: TCP
+        - containerPort: 443
+          hostPort: 8448
+          protocol: TCP
+      volumeMounts:
+        - name: caddy-data
+          mountPath: /data
+        - name: caddy-config
+          mountPath: /config
+
+    # ── tailscale (optional remote-access sidecar) ──────────────────────
+    # To enable: uncomment + set TS_AUTHKEY (from
+    # https://login.tailscale.com/admin/settings/keys), then re-apply.
+    # The container shares the pod's network namespace; once it joins the
+    # tailnet, the admin UI is reachable at https://<TS_HOSTNAME>:8448
+    # from any other tailnet device.
+    # - name: tailscale
+    #   image: ghcr.io/tailscale/tailscale:stable
+    #   env:
+    #     - name: TS_AUTHKEY
+    #       value: tskey-auth-REPLACE-ME
+    #     - name: TS_HOSTNAME
+    #       value: seenoevil
+    #     - name: TS_STATE_DIR
+    #       value: /var/lib/tailscale
+    #     - name: TS_USERSPACE
+    #       value: "true"
+    #     - name: TS_EXTRA_ARGS
+    #       value: --accept-dns=false
+    #   volumeMounts:
+    #     - name: tailscale-state
+    #       mountPath: /var/lib/tailscale

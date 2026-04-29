@@ -14,6 +14,7 @@ import (
 	"image/jpeg"
 
 	// Side-effect imports register decoders.
+	_ "golang.org/x/image/webp"
 	_ "image/gif"
 	_ "image/png"
 
@@ -41,6 +42,26 @@ func Image(raw []byte) (string, bool) {
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, blurred, &jpeg.Options{Quality: jpegQ}); err != nil {
+		return "", false
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), true
+}
+
+// Clear returns a base64-encoded JPEG thumbnail of img, downscaled but NOT
+// blurred. Used by the audit log so admins can verify whether classifier
+// scores match the actual content.
+func Clear(raw []byte) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	src, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return "", false
+	}
+	thumb := scale(src, maxWidth)
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: jpegQ}); err != nil {
 		return "", false
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), true

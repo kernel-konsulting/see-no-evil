@@ -14,6 +14,13 @@ the containers it needs:
 | `docker compose --profile core --profile vpn-wg up -d` | + wg-easy |
 | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile core up -d` | GPU classifiers |
 
+DNS host-port mapping is configurable for rootless Podman compatibility:
+
+- `SNE_DNS_PORT_UDP` (default `1053`)
+- `SNE_DNS_PORT_TCP` (default `1053`)
+
+Set both to `53` if you run with privileges that allow binding low ports.
+
 **M0 reminder:** every service image is a stub that just sleeps. This proves the
 topology and networking; functional behavior lands in M1.
 

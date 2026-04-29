@@ -17,17 +17,36 @@
 }
 
 # ---------------------------------------------------------------------------
-# Admin UI + API
+# Container healthcheck endpoint (host-agnostic, plain HTTP on :80).
+# Caddy's automatic HTTPS redirects normally rewrite /healthz too, so we
+# attach this as a separate site that matches *any* host header on :80.
 # ---------------------------------------------------------------------------
-${SNE_HOSTNAME} {
-    # TLS — switched by SNE_TLS_MODE
+:80 {
+    handle /healthz {
+        respond "ok" 200
+    }
+    # Redirect everything else to HTTPS (preserves Caddy's normal auto-https
+    # behaviour, which is otherwise suppressed by the explicit :80 site).
+    handle {
+        redir https://${SNE_HOSTNAME}{uri} permanent
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Admin UI + API
+#
+# Bound to both ${SNE_HOSTNAME} (the configured admin hostname) AND
+# localhost so the stack works both on the LAN (DNS pointing at the pod)
+# and from the host running Podman (https://localhost:${SNE_HTTPS_PORT}).
+# Caddy's internal CA issues a single cert covering both names.
+# ---------------------------------------------------------------------------
+${SNE_HOSTNAME}, localhost, 127.0.0.1 {
+    # TLS — swapped at startup by entrypoint based on SNE_TLS_MODE.
     # "internal" uses Caddy's built-in CA (self-signed, trusted automatically
     # on the host that runs Caddy; other devices need to import the Caddy root).
     # "acme" uses Let's Encrypt / ZeroSSL — requires a public-facing hostname.
     # "off" serves HTTP only (development / behind existing TLS terminator).
-    tls {$SNE_TLS_EMAIL} {
-        issuer internal
-    }
+    tls internal
 
     # ---------------------------------------------------------------------------
     # Reverse proxy routes
@@ -40,11 +59,11 @@ ${SNE_HOSTNAME} {
 
     # API — everything under /v1 → FastAPI
     handle /v1/* {
-        reverse_proxy api:8000
+        reverse_proxy ${SNE_API_UPSTREAM}
     }
 
     # Admin UI SPA — everything else → nginx-served Vite build
     handle {
-        reverse_proxy ui:80
+        reverse_proxy ${SNE_UI_UPSTREAM}
     }
 }

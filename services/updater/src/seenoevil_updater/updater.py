@@ -67,15 +67,15 @@ _MODEL_ARTEFACTS: dict[str, list[Artefact]] = {
     "freepik": [
         Artefact(
             dest="image_classifier.onnx",
-            # Freepik nsfw_image_detector ONNX export (community upload)
-            url="https://huggingface.co/Falconsai/nsfw_image_detection/resolve/main/onnx/model.onnx",
+            # ONNX export of nsfw-image-detector hosted on HF ONNX community.
+            url="https://huggingface.co/onnx-community/nsfw-image-detector-ONNX/resolve/main/onnx/model.onnx",
             sha256="PLACEHOLDER_FREEPIK_SHA256",  # updated at release
         ),
     ],
     "falconsai": [
         Artefact(
             dest="image_classifier.onnx",
-            url="https://huggingface.co/Falconsai/nsfw_image_detection/resolve/main/onnx/model.onnx",
+            url="https://huggingface.co/onnx-community/nsfw-image-detector-ONNX/resolve/main/onnx/model.onnx",
             sha256="PLACEHOLDER_FALCONSAI_SHA256",
         ),
     ],
@@ -84,12 +84,12 @@ _MODEL_ARTEFACTS: dict[str, list[Artefact]] = {
 _TEXT_ARTEFACTS: list[Artefact] = [
     Artefact(
         dest="text_classifier.onnx",
-        url="https://huggingface.co/michellejieli/NSFW_text_classifier/resolve/main/onnx/model.onnx",
+        url="https://huggingface.co/TrumpMcDonaldz/michellejieli-NSFW_text_classifier-ONNX/resolve/main/onnx/decoder_model_merged.onnx",
         sha256="PLACEHOLDER_TEXT_ONNX_SHA256",
     ),
     Artefact(
         dest="text_tokenizer.json",
-        url="https://huggingface.co/michellejieli/NSFW_text_classifier/resolve/main/tokenizer.json",
+        url="https://huggingface.co/TrumpMcDonaldz/michellejieli-NSFW_text_classifier-ONNX/resolve/main/tokenizer.json",
         sha256="PLACEHOLDER_TEXT_TOKENIZER_SHA256",
     ),
 ]
@@ -200,8 +200,8 @@ def run() -> None:
                 try:
                     _download(client, art, LISTS_DIR)
                 except Exception as exc:
-                    log.error("failed to download %s: %s", art.dest, exc)
-                    errors.append(art.dest)
+                    # DNS can continue with cached/baked lists; model downloads are critical.
+                    log.warning("failed to download %s: %s", art.dest, exc)
         else:
             log.info("SKIP_LISTS=1, skipping blocklist downloads")
 

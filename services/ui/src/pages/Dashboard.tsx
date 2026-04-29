@@ -1,18 +1,33 @@
 import { useQuery } from "@tanstack/react-query";
-import { getHealth, listDevices, listAudit } from "@/lib/api";
+import {
+  getHealth,
+  getDashboardStats,
+  listAudit,
+  type WindowStats,
+} from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Monitor, ShieldCheck, AlertTriangle, Activity } from "lucide-react";
+import {
+  Monitor,
+  ShieldCheck,
+  AlertTriangle,
+  Activity,
+  ShieldAlert,
+} from "lucide-react";
 
 export default function Dashboard() {
-  const { data: health } = useQuery({ queryKey: ["health"], queryFn: getHealth });
-  const { data: devices } = useQuery({ queryKey: ["devices"], queryFn: listDevices });
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: getHealth,
+  });
+  const { data: stats } = useQuery({
+    queryKey: ["dashboard", "stats"],
+    queryFn: getDashboardStats,
+    refetchInterval: 30_000,
+  });
   const { data: audit } = useQuery({
     queryKey: ["audit", "recent"],
     queryFn: () => listAudit(10),
   });
-
-  const blocked = audit?.filter((a) => a.decision === "block").length ?? 0;
-  const allowed = audit?.filter((a) => a.decision === "allow").length ?? 0;
 
   return (
     <div className="space-y-6">
@@ -36,23 +51,30 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Stat cards */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      {/* Top-level totals */}
+      <div className="grid gap-4 sm:grid-cols-2">
         <StatCard
           icon={<Monitor className="h-5 w-5 text-muted-foreground" />}
           title="Devices"
-          value={devices?.length ?? "—"}
+          value={stats?.devices ?? "—"}
         />
         <StatCard
-          icon={<ShieldCheck className="h-5 w-5 text-green-600" />}
-          title="Allowed (last 10)"
-          value={allowed}
+          icon={<ShieldAlert className="h-5 w-5 text-amber-600" />}
+          title="Pending in quarantine"
+          value={stats?.quarantine_pending ?? "—"}
         />
-        <StatCard
-          icon={<AlertTriangle className="h-5 w-5 text-red-600" />}
-          title="Blocked (last 10)"
-          value={blocked}
-        />
+      </div>
+
+      {/* Per-window decision breakdown */}
+      <div>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Decisions by window
+        </h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {(stats?.windows ?? []).map((w) => (
+            <WindowCard key={w.label} window={w} />
+          ))}
+        </div>
       </div>
 
       {/* Recent audit */}
@@ -93,6 +115,44 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function WindowCard({ window: w }: { window: WindowStats }) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">{w.label}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        <Row label="Allowed" value={w.allowed} tone="text-green-700" />
+        <Row label="Blocked" value={w.blocked} tone="text-red-700" />
+        <Row
+          label="Pending"
+          value={w.quarantined_pending}
+          tone="text-amber-700"
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function Row({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={`text-xl font-semibold tabular-nums ${tone}`}>
+        {value.toLocaleString()}
+      </span>
     </div>
   );
 }

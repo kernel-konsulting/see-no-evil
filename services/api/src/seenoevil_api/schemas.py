@@ -121,6 +121,7 @@ class AuditOut(BaseModel):
     decision: str
     reason: str
     classifier_scores: dict[str, Any]
+    thumbnail_b64: str | None = None
 
 
 class DecideRequest(BaseModel):
@@ -131,6 +132,15 @@ class DecideRequest(BaseModel):
     classifier_scores: dict[str, float] = Field(default_factory=dict)
     device_mac: str | None = None
     device_id: int | None = None
+    # Best-effort source IP captured by the proxy. The API uses it both for
+    # device lookup (matches scanner-supplied Device.ip) and to synthesise a
+    # device row when no MAC is available.
+    client_ip: str | None = None
+    # Optional explicit verdict from the proxy when a classifier has already
+    # blocked/allowed the response body. The API persists it and applies
+    # quarantine/notifications instead of re-deciding it as a pure policy check.
+    decision: str | None = None
+    reason: str | None = None
     # Optional small base64-encoded blurred preview, supplied by the proxy
     # for image/video responses so the quarantine queue can render thumbnails.
     thumbnail_b64: str | None = None
@@ -216,3 +226,6 @@ class QuarantineOut(BaseModel):
     status: str
     resolved_at: datetime | None
     resolved_by: str | None
+    flag_note: str | None = None
+    flagged_by: str | None = None
+    flagged_at: datetime | None = None

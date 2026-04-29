@@ -18,11 +18,12 @@ Per-label scores reported back are the **max** seen across frames.
 - Streams video chunks from the proxy and writes them to a temp file capped at
   `VIDEO_SAMPLER_MAX_BYTES` (default 50 MiB). Anything bigger is **fail-open**
   to keep large legitimate uploads from stalling the proxy.
-- `ffmpeg` invocation: `ffmpeg -y -i <tmp.mp4> -vf "thumbnail,scale=<frames>:-1" -frames:v <frames> -f image2 -q:v 5 frame-%03d.jpg`
+- `ffmpeg` invocation: probe duration with `ffprobe`, then extract evenly
+  spaced JPEG frames with `ffmpeg -vf fps=<frames/duration>,scale=...`.
 - Image classifier dial address: `IMAGE_CLASSIFIER_ADDR` (default `image-classifier:50051`)
-- ffmpeg failures (missing binary, malformed video, decode error) → ALLOW with
-  reason `video_sampler:ffmpeg_failed`. The proxy never blocks because of
-  infrastructure faults.
+- ffmpeg failures (missing binary, malformed video, decode error) are reported
+  as `video_sampler:ffmpeg_failed`. The proxy treats that as unscannable video
+  and blocks it in normal inspection mode.
 
 ## Tunables
 

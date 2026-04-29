@@ -24,7 +24,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/lib/python3.12/site-packages
 
 RUN groupadd --system --gid 10001 app \
- && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app
+ && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app \
+ && mkdir -p /data/models /data/lists \
+ && chown -R app:app /data \
+ && chmod -R 0775     /data
 
 WORKDIR /app
 COPY --from=builder /install /app

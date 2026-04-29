@@ -31,6 +31,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/config"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/mitm"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/runtime"
 )
 
 func main() {
@@ -84,6 +85,9 @@ func main() {
 	// Policy API client (HTTP, talks to the api service).
 	policyClient := policy.NewClient(cfg.PolicyAPIURL())
 
+	// Runtime settings poller.
+	runtimePoller := runtime.NewPoller(cfg.PolicyAPIURL(), 30*time.Second)
+
 	// Build the MITM proxy handler.
 	handler := mitm.NewHandler(mitm.Config{
 		CA:            caKeyPair,
@@ -95,8 +99,12 @@ func main() {
 			YouTubeRestricted: cfg.Proxy.SafeSearch.YouTubeRestricted,
 		},
 		MaxInspectBytes: cfg.Proxy.MaxInspectBytes(),
+		MaxImageBytes:   cfg.Proxy.MaxImageBytes(),
+		MaxTextBytes:    cfg.Proxy.MaxTextBytes(),
+		MaxVideoBytes:   cfg.Proxy.MaxVideoBytes(),
 		Classifiers:     classifierClients,
 		Policy:          policyClient,
+		Runtime:         runtimePoller,
 		TextInspection: mitm.TextInspectionCfg{
 			Mode:          cfg.Proxy.TextInspection.Mode,
 			NSFWThreshold: cfg.Proxy.TextInspection.NSFWThreshold,
@@ -128,6 +136,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	go runtimePoller.Run(ctx)
 
 	go func() {
 		slog.Info("proxy listening", "addr", proxySrv.Addr)

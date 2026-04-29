@@ -18,7 +18,12 @@ from fastapi import FastAPI, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auth import require_admin_factory, set_admin_password
+from .auth import (
+    current_user_factory,
+    require_admin_factory,
+    require_user_factory,
+    set_admin_password,
+)
 from .config import AppConfig, ProfileConfig, load_config
 from .db import build_engine, get_db, make_session_factory
 from .migrations import upgrade_to_head
@@ -27,6 +32,8 @@ from .routers import (
     alerts,
     audit,
     auth,
+    ca,
+    dashboard,
     decide,
     devices,
     health,
@@ -34,6 +41,13 @@ from .routers import (
     profiles,
     quarantine,
     quota,
+    scanner,
+)
+from .routers import (
+    settings as settings_router,
+)
+from .routers import (
+    users as users_router,
 )
 
 log = logging.getLogger("seenoevil_api")
@@ -49,6 +63,7 @@ def _profile_to_orm(p: ProfileConfig) -> Profile:
         schedule=dict(p.schedule),
         quota_minutes_per_day=p.quota_minutes_per_day,
         allow_domains=list(p.allow.domains),
+        enforce_allowlist=bool(getattr(p, "enforce_allowlist", False)),
         deny_domains=list(p.deny.domains),
         deny_url_keywords=list(p.deny.url_keywords),
         allow_youtube_channels=list(p.allow.youtube_channels),
@@ -124,20 +139,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.session_factory = session_factory
 
     require_admin = require_admin_factory(db_dep)
+    require_user = require_user_factory(db_dep)
+    current_user = current_user_factory(db_dep)
 
     def get_config_dep() -> AppConfig:
         return config
 
     app.include_router(health.make_router(db_dep))
-    app.include_router(auth.make_router(db_dep, get_config_dep))
+    app.include_router(auth.make_router(db_dep, get_config_dep, current_user))
     app.include_router(profiles.make_router(db_dep, require_admin))
     app.include_router(devices.make_router(db_dep, require_admin, get_config_dep))
-    app.include_router(audit.make_router(db_dep, require_admin))
-    app.include_router(quarantine.make_router(db_dep, require_admin))
+    app.include_router(audit.make_router(db_dep, require_user))
+    app.include_router(quarantine.make_router(db_dep, require_admin, require_user, current_user))
     app.include_router(quota.make_router(db_dep, require_admin))
     app.include_router(panic.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(decide.make_router(db_dep, get_config_dep))
     app.include_router(alerts.make_router(get_config_dep))
+    app.include_router(settings_router.make_router(db_dep, require_admin))
+    app.include_router(users_router.make_router(db_dep, require_admin))
+    app.include_router(ca.make_router())
+    app.include_router(scanner.make_router(require_admin))
+    app.include_router(dashboard.make_router(db_dep, require_user))
 
     @app.exception_handler(ValueError)
     async def _value_error_handler(_request, exc: ValueError):  # pragma: no cover - trivial

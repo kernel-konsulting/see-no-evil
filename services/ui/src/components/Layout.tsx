@@ -5,22 +5,39 @@ import {
   Shield,
   ScrollText,
   ShieldAlert,
+  ShieldCheck,
+  Settings as SettingsIcon,
+  Users as UsersIcon,
   LogOut,
 } from "lucide-react";
 import { useAuth } from "@/lib/use-auth";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-const NAV_ITEMS = [
+const NAV_ITEMS: ReadonlyArray<{
+  to: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  adminOnly?: boolean;
+}> = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/devices", label: "Devices", icon: Monitor },
-  { to: "/profiles", label: "Profiles", icon: Shield },
-  { to: "/quarantine", label: "Quarantine", icon: ShieldAlert },
+  { to: "/devices", label: "Devices", icon: Monitor, adminOnly: true },
+  { to: "/profiles", label: "Profiles", icon: Shield, adminOnly: true },
+  {
+    to: "/quarantine",
+    label: "Quarantine",
+    icon: ShieldAlert,
+    adminOnly: true,
+  },
   { to: "/audit", label: "Audit Log", icon: ScrollText },
+  { to: "/settings", label: "Settings", icon: SettingsIcon, adminOnly: true },
+  { to: "/users", label: "Users", icon: UsersIcon, adminOnly: true },
+  { to: "/setup", label: "Device setup", icon: ShieldCheck, adminOnly: true },
 ];
 
 export default function Layout() {
-  const { logout } = useAuth();
+  const { logout, role, me, isAdmin } = useAuth();
+  const items = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
 
   return (
     <div className="flex min-h-screen">
@@ -30,9 +47,17 @@ export default function Layout() {
           <span className="font-semibold text-lg tracking-tight">
             see-no-evil
           </span>
+          {me && (
+            <div className="mt-1 text-xs text-muted-foreground truncate">
+              {me.email}{" "}
+              <span className="ml-1 inline-block px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase tracking-wide">
+                {role ?? "user"}
+              </span>
+            </div>
+          )}
         </div>
         <nav className="flex-1 py-4 px-3 space-y-1">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+          {items.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
