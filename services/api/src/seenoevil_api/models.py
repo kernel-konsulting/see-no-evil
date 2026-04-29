@@ -44,6 +44,7 @@ class Profile(Base):
     schedule: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     quota_minutes_per_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     allow_domains: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    enforce_allowlist: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deny_domains: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     deny_url_keywords: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     allow_youtube_channels: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
@@ -95,6 +96,7 @@ class AuditDecision(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     classifier_scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    thumbnail_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (Index("ix_audit_device_ts", "device_id", "ts"),)
 
@@ -148,5 +150,27 @@ class QuarantineItem(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Optional false-positive flag, written by admins or viewers via
+    # ``POST /v1/quarantine/{id}/flag``. Surfaced in the UI so admins can
+    # review reports without changing the lifecycle status.
+    flag_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flagged_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    flagged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (Index("ix_quarantine_status_ts", "status", "ts"),)
+
+
+class User(Base):
+    """Multi-user admin/viewer account."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="admin", nullable=False)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
+    )

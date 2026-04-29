@@ -30,6 +30,7 @@ export interface Profile {
   schedule: Record<string, string>;
   quota_minutes_per_day: number;
   allow_domains: string[];
+  enforce_allowlist: boolean;
   deny_domains: string[];
   deny_url_keywords: string[];
   allow_youtube_channels: string[];
@@ -49,6 +50,7 @@ export interface AuditEntry {
   decision: "allow" | "block" | "warn";
   reason: string;
   classifier_scores: Record<string, unknown>;
+  thumbnail_b64: string | null;
 }
 
 export interface HealthResponse {
@@ -89,6 +91,49 @@ export async function login(
     email: username,
     password,
   });
+  return data;
+}
+
+export interface MeResponse {
+  email: string;
+  role: "admin" | "viewer" | string;
+}
+
+export async function getMe(): Promise<MeResponse> {
+  const { data } = await http.get<MeResponse>("/auth/me");
+  return data;
+}
+
+export interface OidcInfo {
+  enabled: boolean;
+  label: string;
+}
+
+export async function getOidcInfo(): Promise<OidcInfo> {
+  const { data } = await http.get<OidcInfo>("/auth/oidc/info");
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+export interface WindowStats {
+  label: string;
+  seconds: number | null;
+  allowed: number;
+  blocked: number;
+  quarantined_pending: number;
+}
+
+export interface DashboardStats {
+  devices: number;
+  quarantine_pending: number;
+  windows: WindowStats[];
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  const { data } = await http.get<DashboardStats>("/dashboard/stats");
   return data;
 }
 
@@ -153,9 +198,48 @@ export async function deleteProfile(id: number): Promise<void> {
 // Audit log
 // ---------------------------------------------------------------------------
 
-export async function listAudit(limit = 50): Promise<AuditEntry[]> {
+export async function listAudit(limit = 100): Promise<AuditEntry[]> {
   const { data } = await http.get<AuditEntry[]>("/audit", {
     params: { limit },
+  });
+  return data;
+}
+
+export interface AuditPageOptions {
+  limit?: number;
+  beforeId?: number | null;
+}
+
+export async function listAuditPage(
+  opts: AuditPageOptions = {},
+): Promise<AuditEntry[]> {
+  const params: Record<string, number> = { limit: opts.limit ?? 100 };
+  if (opts.beforeId != null) params.before_id = opts.beforeId;
+  const { data } = await http.get<AuditEntry[]>("/audit", { params });
+  return data;
+}
+
+export async function clearAudit(): Promise<void> {
+  await http.delete("/audit");
+}
+
+// ---------------------------------------------------------------------------
+// Scanner
+// ---------------------------------------------------------------------------
+
+export interface ScanResult {
+  ok: boolean;
+  cidr?: string;
+  devices_found?: number;
+  devices_created?: number;
+  duration_seconds?: number;
+  note?: string;
+  error?: string;
+}
+
+export async function scanNetwork(): Promise<ScanResult> {
+  const { data } = await http.post<ScanResult>("/scanner/scan", null, {
+    timeout: 180_000,
   });
   return data;
 }
@@ -171,6 +255,45 @@ export async function getHealth(): Promise<HealthResponse> {
   });
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// MITM root CA
+// ---------------------------------------------------------------------------
+
+export interface CaInstallSteps {
+  macos: string[];
+  ios: string[];
+  android: string[];
+  windows: string[];
+  linux: string[];
+}
+
+export interface CaProxySetup {
+  summary: string;
+  macos: string;
+  ios: string;
+  android: string;
+  windows: string;
+}
+
+export interface CaInfo {
+  present: boolean;
+  path: string;
+  size_bytes: number;
+  download_url: string;
+  install: CaInstallSteps;
+  proxy_setup: CaProxySetup;
+}
+
+export async function getCaInfo(): Promise<CaInfo> {
+  const { data } = await http.get<CaInfo>("/v1/ca/info", {
+    baseURL: "",
+    withCredentials: false,
+  });
+  return data;
+}
+
+export const CA_DOWNLOAD_URL = "/v1/ca/cert";
 
 // ---------------------------------------------------------------------------
 // Quarantine
@@ -189,6 +312,9 @@ export interface QuarantineItem {
   status: "pending" | "allowed" | "denied";
   resolved_at: string | null;
   resolved_by: string | null;
+  flag_note: string | null;
+  flagged_by: string | null;
+  flagged_at: string | null;
 }
 
 export async function listQuarantine(
@@ -211,6 +337,124 @@ export async function denyQuarantine(id: number): Promise<QuarantineItem> {
   return data;
 }
 
+export interface BulkQuarantineResult {
+  updated: number;
+}
+
+export async function allowAllQuarantine(): Promise<BulkQuarantineResult> {
+  const { data } = await http.post<BulkQuarantineResult>(
+    "/quarantine/bulk-allow",
+    {},
+  );
+  return data;
+}
+
+export async function denyAllQuarantine(): Promise<BulkQuarantineResult> {
+  const { data } = await http.post<BulkQuarantineResult>(
+    "/quarantine/bulk-deny",
+    {},
+  );
+  return data;
+}
+
+export async function flagQuarantine(
+  id: number,
+  note: string,
+): Promise<QuarantineItem> {
+  const { data } = await http.post<QuarantineItem>(`/quarantine/${id}/flag`, {
+    note,
+  });
+  return data;
+}
+
 export async function deleteQuarantine(id: number): Promise<void> {
   await http.delete(`/quarantine/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Settings (runtime)
+// ---------------------------------------------------------------------------
+
+export interface RuntimeSettings {
+  inspect: {
+    image: boolean;
+    video: boolean;
+    text: boolean;
+    domain: boolean;
+    url: boolean;
+  };
+  lists: {
+    global_allow_domains: string[];
+    enforce_global_allowlist: boolean;
+    global_deny_domains: string[];
+    global_deny_keywords: string[];
+  };
+  text: {
+    nsfw_threshold: number;
+  };
+  image: {
+    sexy_threshold: number;
+    porn_threshold: number;
+    hentai_threshold: number;
+  };
+  notifications: {
+    enabled: boolean;
+    ntfy_url: string;
+    webhook_url: string;
+    webhook_token: string;
+    on_block: boolean;
+    on_quarantine: boolean;
+    on_panic: boolean;
+  };
+}
+
+export async function getSettings(): Promise<RuntimeSettings> {
+  const { data } = await http.get<RuntimeSettings>("/settings");
+  return data;
+}
+
+export async function updateSettings(
+  patch: Partial<RuntimeSettings>,
+): Promise<RuntimeSettings> {
+  const { data } = await http.put<RuntimeSettings>("/settings", patch);
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  role: string;
+  disabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listUsers(): Promise<AdminUser[]> {
+  const { data } = await http.get<AdminUser[]>("/users");
+  return data;
+}
+
+export async function createUser(payload: {
+  email: string;
+  password: string;
+  role?: string;
+}): Promise<AdminUser> {
+  const { data } = await http.post<AdminUser>("/users", payload);
+  return data;
+}
+
+export async function updateUser(
+  id: number,
+  payload: { password?: string; role?: string; disabled?: boolean },
+): Promise<AdminUser> {
+  const { data } = await http.patch<AdminUser>(`/users/${id}`, payload);
+  return data;
+}
+
+export async function deleteUser(id: number): Promise<void> {
+  await http.delete(`/users/${id}`);
 }

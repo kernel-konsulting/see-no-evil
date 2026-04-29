@@ -209,7 +209,7 @@ def test_notification_sent_on_block(
     assert hook["headers"]["Authorization"] == "Bearer t0k"
     body = hook["json"]
     assert body["event"] == "block"
-    assert body["reason"] == "deny_domain"
+    assert body["reason"] == "deny_domain:tiktok.com"
 
 
 def test_notification_skipped_when_no_targets(

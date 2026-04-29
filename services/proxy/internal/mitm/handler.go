@@ -14,13 +14,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"encoding/xml"
 	"fmt"
 	"html"
+	"image"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,6 +35,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/classifier"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/preview"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/runtime"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/safesearch"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/textextract"
 )
@@ -62,13 +68,20 @@ var (
 
 // Config holds all dependencies for the MITM handler.
 type Config struct {
-	CA              *ca.KeyPair
-	BypassDomains   []string
-	SafeSearch      SafeSearchCfg
+	CA            *ca.KeyPair
+	BypassDomains []string
+	SafeSearch    SafeSearchCfg
+	// MaxInspectBytes is the legacy global cap; per-type caps below take
+	// precedence. Kept for backwards compatibility.
 	MaxInspectBytes int64
-	Classifiers     *classifier.Clients
-	Policy          *policy.Client
-	TextInspection  TextInspectionCfg
+	// Per-content-type caps. 0 = use MaxInspectBytes; very large (1<<62) = no cap.
+	MaxImageBytes  int64
+	MaxTextBytes   int64
+	MaxVideoBytes  int64
+	Classifiers    *classifier.Clients
+	Runtime        *runtime.Poller
+	Policy         *policy.Client
+	TextInspection TextInspectionCfg
 }
 
 // TextInspectionCfg controls how the text classifier verdict is applied.
@@ -92,11 +105,20 @@ type SafeSearchCfg struct {
 
 // Handler is an http.Handler that proxies and optionally inspects traffic.
 type Handler struct {
-	cfg       Config
-	leafCache *ca.LeafCache
-	bypass    map[string]bool // lower-case bypass domain set
-	ssCfg     safesearch.Config
+	cfg                  Config
+	leafCache            *ca.LeafCache
+	bypass               map[string]bool // lower-case bypass domain set
+	ssCfg                safesearch.Config
+	blockedYouTubeMu     sync.Mutex
+	blockedYouTubeVideos map[string]blockedYouTubeVideo
 }
+
+type blockedYouTubeVideo struct {
+	reason    string
+	expiresAt time.Time
+}
+
+const blockedYouTubeTTL = 6 * time.Hour
 
 func NewHandler(cfg Config) *Handler {
 	bypass := make(map[string]bool, len(cfg.BypassDomains))
@@ -104,9 +126,10 @@ func NewHandler(cfg Config) *Handler {
 		bypass[strings.ToLower(strings.TrimPrefix(d, "*."))] = true
 	}
 	return &Handler{
-		cfg:       cfg,
-		leafCache: ca.NewLeafCache(cfg.CA),
-		bypass:    bypass,
+		cfg:                  cfg,
+		leafCache:            ca.NewLeafCache(cfg.CA),
+		bypass:               bypass,
+		blockedYouTubeVideos: make(map[string]blockedYouTubeVideo),
 		ssCfg: safesearch.Config{
 			Google:            cfg.SafeSearch.Google,
 			Bing:              cfg.SafeSearch.Bing,
@@ -187,10 +210,28 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	removeHopHeaders(r.Header)
 	r.Header.Del("Proxy-Connection")
 
-	// Read the request body for inspection (if applicable).
+	// Read the request body for inspection (if applicable). Request bodies
+	// (POSTed forms / uploads) use the text limit since they're typically
+	// form data or JSON.
 	var reqBodySnap []byte
 	if r.Body != nil && r.ContentLength != 0 {
-		reqBodySnap, r.Body = peekBody(r.Body, h.cfg.MaxInspectBytes)
+		reqBodySnap, r.Body = peekBody(r.Body, h.limitFor(r.Header.Get("Content-Type")))
+	}
+
+	if reason, ok := h.blockReasonForYouTubeRequest(r, reqBodySnap); ok {
+		requestsTotal.WithLabelValues("block").Inc()
+		requestDuration.WithLabelValues("block").Observe(time.Since(t0).Seconds())
+		slog.Info("request blocked",
+			"url", r.URL.String(),
+			"method", r.Method,
+			"host", r.Host,
+			"content_type", r.Header.Get("Accept"),
+			"device_mac", r.Header.Get("X-Device-Mac"),
+			"client_ip", clientIP(r),
+			"reason", reason,
+		)
+		writeBlockPage(w, r.URL.String(), reason)
+		return
 	}
 
 	// Forward the request upstream.
@@ -199,27 +240,44 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
+	resp = h.refetchFullVideoIfNeeded(r, resp)
 	defer func() { _ = resp.Body.Close() }()
 
-	// Read response body for inspection.
+	// Read response body for inspection. Use the per-type cap so images and
+	// text are sent to the classifier in full — truncating an image past
+	// its header makes the decoder reject it.
 	var respBodySnap []byte
-	if shouldInspect(resp.Header.Get("Content-Type")) {
-		respBodySnap, resp.Body = peekBody(resp.Body, h.cfg.MaxInspectBytes)
+	respCT := resp.Header.Get("Content-Type")
+	if shouldInspect(respCT) {
+		respBodySnap, resp.Body = peekBody(resp.Body, h.limitFor(respCT))
 	}
 
 	// Classify and decide. May return a replacement body when text-strip mode
 	// is enabled and the classifier flagged some segments.
-	decision, replacementBody := h.decide(r.Context(), r, resp, reqBodySnap, respBodySnap)
+	decision, reason, replacementBody := h.decide(r.Context(), r, resp, reqBodySnap, respBodySnap)
 	requestsTotal.WithLabelValues(decision).Inc()
 	requestDuration.WithLabelValues(decision).Observe(time.Since(t0).Seconds())
 
 	if decision == "block" {
-		writeBlockPage(w, r.URL.String())
+		reason = nonEmptyReason(reason, "unspecified_block")
+		slog.Info("request blocked",
+			"url", r.URL.String(),
+			"method", r.Method,
+			"host", r.Host,
+			"content_type", respCT,
+			"device_mac", r.Header.Get("X-Device-Mac"),
+			"client_ip", clientIP(r),
+			"reason", reason,
+		)
+		writeBlockedResponse(w, r.URL.String(), reason, respCT, respBodySnap)
 		return
 	}
 
 	// Copy the response to the client.
 	copyHeaders(w.Header(), resp.Header)
+	if shouldInspect(respCT) {
+		markNoStore(w.Header())
+	}
 	if replacementBody != nil {
 		// We rewrote the body — original Content-Length is now stale.
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(replacementBody)))
@@ -240,13 +298,36 @@ func (h *Handler) decide(
 	r *http.Request,
 	resp *http.Response,
 	reqBody, respBody []byte,
-) (string, []byte) {
+) (string, string, []byte) {
 	ct := resp.Header.Get("Content-Type")
 	scores := make(map[string]float32)
 	var replacementBody []byte
+	// thumb is the un-blurred small JPEG of the analysed image, attached to
+	// every audit row for image responses so admins can verify scoring.
+	var thumb string
+
+	// Live runtime settings (image/text/video toggles).
+	rt := runtime.Settings{}
+	if h.cfg.Runtime != nil {
+		if cur := h.cfg.Runtime.Get(); cur != nil {
+			rt = *cur
+		}
+	} else {
+		rt.Inspect.Image = true
+		rt.Inspect.Video = true
+		rt.Inspect.Text = true
+		rt.Inspect.Domain = true
+		rt.Inspect.URL = true
+	}
+	if !rt.Inspect.Domain && !rt.Inspect.URL {
+		// Keep the zero-value runtime struct from accidentally disabling both
+		// domain and URL checks before the first runtime poll succeeds.
+		rt.Inspect.Domain = true
+		rt.Inspect.URL = true
+	}
 
 	// Image classification.
-	if isImage(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
+	if rt.Inspect.Image && isImage(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
 		result, err := h.cfg.Classifiers.ClassifyImage(ctx, respBody, r.Header.Get("X-Request-Id"))
 		if err != nil {
 			slog.Warn("image classifier error", "err", err)
@@ -255,31 +336,64 @@ func (h *Handler) decide(
 			for k, v := range result.Scores {
 				scores["image:"+k] = v
 			}
+			// Always capture a clear thumbnail; cheap and lets the audit log
+			// show what was actually scored.
+			thumb, _ = preview.Clear(respBody)
+			// INFO log so admins can see what each image scored — invaluable
+			// when tuning thresholds.
+			slog.Info("image classified",
+				"url", r.URL.String(),
+				"action", result.Action.String(),
+				"scores", result.Scores,
+				"bytes", len(respBody),
+			)
 			if result.Action.String() == "ACTION_BLOCK" {
-				thumb, _ := preview.Image(respBody)
-				_ = h.auditDecide(ctx, r, ct, scores, "block", thumb)
-				return "block", nil
+				reason := classifierBlockReason("image", result.Reason, result.Scores)
+				h.rememberBlockedYouTubeVideo(r, nil, reason)
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, thumb)
+				return "block", reason, nil
 			}
 		}
 	}
 
 	// Video sampling: stream the buffered video body to the video-sampler
 	// service which extracts evenly-spaced frames and classifies each.
-	if isVideo(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil && h.cfg.Classifiers.Video != nil {
+	if rt.Inspect.Video && isVideo(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil && h.cfg.Classifiers.Video != nil {
 		result, err := h.cfg.Classifiers.SampleVideo(ctx, respBody, 0, r.Header.Get("X-Request-Id"))
 		if err != nil {
 			slog.Warn("video sampler error", "err", err)
 			classifierErrors.WithLabelValues("video").Inc()
+			reason := "classifier:video:sampler_error"
+			_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+			return "block", reason, nil
+		} else if result == nil {
+			reason := "classifier:video:sampler_unavailable"
+			_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+			return "block", reason, nil
 		} else if result != nil {
 			for k, v := range result.Scores {
 				scores["video:"+k] = v
+			}
+			slog.Info("video sampled",
+				"url", r.URL.String(),
+				"action", result.Action.String(),
+				"reason", result.Reason,
+				"frames", result.FramesScored,
+				"scores", result.Scores,
+				"bytes", len(respBody),
+			)
+			if isVideoSamplerFailure(result.Reason) {
+				reason := classifierBlockReason("video", result.Reason, result.Scores)
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+				return "block", reason, nil
 			}
 			if result.Action.String() == "ACTION_BLOCK" {
 				// We don't have a frame thumbnail returned by the sampler today;
 				// the quarantine UI will show the placeholder. (Returning a frame
 				// in the proto is tracked for a future iteration.)
-				_ = h.auditDecide(ctx, r, ct, scores, "block", "")
-				return "block", nil
+				reason := classifierBlockReason("video", result.Reason, result.Scores)
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+				return "block", reason, nil
 			}
 		}
 	}
@@ -287,14 +401,15 @@ func (h *Handler) decide(
 	// Text classification (response body) using extracted natural-language
 	// segments only — feeding raw HTML/JSON to the classifier produces
 	// constant false positives on markup tokens.
-	if h.textMode() != "off" && textextract.IsSupported(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
-		action, segScores, replaced := h.inspectText(ctx, r, ct, respBody)
+	if h.textMode() != "off" && rt.Inspect.Text && !skipTextClassification(r) && textextract.IsSupported(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
+		action, reason, segScores, replaced := h.inspectText(ctx, r, ct, respBody, rt.Text.NSFWThreshold)
 		for k, v := range segScores {
 			scores["text:"+k] = v
 		}
 		if action == "block" {
-			_ = h.auditDecide(ctx, r, ct, scores, "block", "")
-			return "block", nil
+			reason = nonEmptyReason(reason, "classifier:text")
+			_ = h.auditDecide(ctx, r, ct, scores, "block", reason, thumb)
+			return "block", reason, nil
 		}
 		replacementBody = replaced
 	}
@@ -305,22 +420,45 @@ func (h *Handler) decide(
 		result, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
 			URL:              r.URL.String(),
 			DeviceMAC:        mac,
+			ClientIP:         clientIP(r),
 			ContentType:      ct,
 			ClassifierScores: scores,
+			ThumbnailB64:     thumb,
 		})
 		if err != nil {
 			slog.Warn("policy API error", "err", err)
 			// Fail-open on policy API errors (classifiers already ran).
-			return "allow", replacementBody
+			return "allow", "policy_api_error", replacementBody
 		}
-		_ = h.auditDecide(ctx, r, ct, scores, result.Decision, "")
 		if result.Decision == "block" {
-			return "block", nil
+			reason := nonEmptyReason(result.Reason, "policy:block")
+			return "block", reason, nil
 		}
-		return result.Decision, replacementBody
+		return result.Decision, result.Reason, replacementBody
 	}
 
-	return "allow", replacementBody
+	return "allow", "default", replacementBody
+}
+
+func skipTextClassification(r *http.Request) bool {
+	host := bareHost(r)
+	if host == "" && r.URL != nil {
+		host = r.URL.Hostname()
+	}
+	host = strings.ToLower(host)
+	path := "/"
+	if r.URL != nil && r.URL.Path != "" {
+		path = r.URL.Path
+	}
+	if isGoogleSearchHost(host) && (path == "/" || path == "/search") {
+		return true
+	}
+	return false
+}
+
+func isGoogleSearchHost(host string) bool {
+	h := strings.TrimPrefix(strings.ToLower(host), "www.")
+	return h == "google.com" || strings.HasSuffix(h, ".google.com")
 }
 
 // textMode returns the configured text-inspection mode, defaulting to "block".
@@ -334,11 +472,58 @@ func (h *Handler) textMode() string {
 	}
 }
 
-func (h *Handler) textThreshold() float32 {
+func (h *Handler) textThreshold(runtimeThreshold float32) float32 {
+	if runtimeThreshold > 0 {
+		return runtimeThreshold
+	}
 	if h.cfg.TextInspection.NSFWThreshold > 0 {
 		return h.cfg.TextInspection.NSFWThreshold
 	}
 	return 0.5
+}
+
+func nonEmptyReason(reason, fallback string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = fallback
+	}
+	if len(reason) > 128 {
+		return reason[:128]
+	}
+	return reason
+}
+
+func classifierBlockReason(kind, classifierReason string, scores map[string]float32) string {
+	r := strings.TrimSpace(classifierReason)
+	r = strings.TrimPrefix(r, "classifier:")
+	r = strings.TrimPrefix(r, "video_sampler:")
+	for _, prefix := range []string{kind + ":", "image:", "video:", "text:"} {
+		r = strings.TrimPrefix(r, prefix)
+	}
+	if r == "" {
+		r = topScoreLabel(scores)
+	}
+	if r == "" {
+		return nonEmptyReason("", "classifier:"+kind)
+	}
+	return nonEmptyReason("classifier:"+kind+":"+r, "classifier:"+kind)
+}
+
+func isVideoSamplerFailure(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return strings.HasPrefix(reason, "video_sampler:") && strings.Contains(reason, "failed")
+}
+
+func topScoreLabel(scores map[string]float32) string {
+	var label string
+	var best float32
+	for k, v := range scores {
+		if label == "" || v > best {
+			label = k
+			best = v
+		}
+	}
+	return label
 }
 
 // inspectText runs the text classifier over the natural-language segments of
@@ -353,15 +538,17 @@ func (h *Handler) inspectText(
 	r *http.Request,
 	contentType string,
 	body []byte,
-) (string, map[string]float32, []byte) {
+	runtimeThreshold float32,
+) (string, string, map[string]float32, []byte) {
 	segments := textextract.Extract(contentType, body)
 	if len(segments) == 0 {
-		return "allow", nil, nil
+		return "allow", "", nil, nil
 	}
 
-	threshold := h.textThreshold()
+	threshold := h.textThreshold(runtimeThreshold)
 	maxScores := map[string]float32{}
 	flagged := map[string]bool{} // segment text → true when over threshold
+	blockReason := ""
 	requestID := r.Header.Get("X-Request-Id")
 
 	for _, seg := range segments {
@@ -378,11 +565,14 @@ func (h *Handler) inspectText(
 		}
 		if res.Action.String() == "ACTION_BLOCK" || res.Scores["nsfw"] >= threshold {
 			flagged[seg.Text] = true
+			if blockReason == "" {
+				blockReason = classifierBlockReason("text", res.Reason, res.Scores)
+			}
 		}
 	}
 
 	if len(flagged) == 0 {
-		return "allow", maxScores, nil
+		return "allow", "", maxScores, nil
 	}
 
 	if h.textMode() == "strip" {
@@ -394,26 +584,198 @@ func (h *Handler) inspectText(
 			return flagged[s]
 		}, replacement)
 		if changed {
-			return "allow", maxScores, newBody
+			return "allow", blockReason, maxScores, newBody
 		}
 		// Fall through to allow even if rewriting failed; we already logged.
-		return "allow", maxScores, nil
+		return "allow", blockReason, maxScores, nil
 	}
 
 	// mode == "block"
-	return "block", maxScores, nil
+	return "block", blockReason, maxScores, nil
 }
 
-func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, scores map[string]float32, decision string, thumbnail string) error {
+func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, scores map[string]float32, decision string, reason string, thumbnail string) error {
 	// Best-effort — ignore errors.
 	_, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
 		URL:              r.URL.String(),
 		DeviceMAC:        r.Header.Get("X-Device-Mac"),
+		ClientIP:         clientIP(r),
 		ContentType:      ct,
 		ClassifierScores: scores,
+		Decision:         decision,
+		Reason:           reason,
 		ThumbnailB64:     thumbnail,
 	})
 	return err
+}
+
+func (h *Handler) rememberBlockedYouTubeVideo(r *http.Request, body []byte, reason string) {
+	id := extractYouTubeVideoID(r, body)
+	if id == "" || !isYouTubeThumbnailHost(bareHost(r)) {
+		return
+	}
+
+	h.blockedYouTubeMu.Lock()
+	h.blockedYouTubeVideos[id] = blockedYouTubeVideo{
+		reason:    nonEmptyReason(reason, "classifier:image"),
+		expiresAt: time.Now().Add(blockedYouTubeTTL),
+	}
+	h.blockedYouTubeMu.Unlock()
+
+	slog.Info("youtube video marked blocked from thumbnail", "video_id", id, "url", r.URL.String(), "reason", reason)
+}
+
+func (h *Handler) blockReasonForYouTubeRequest(r *http.Request, body []byte) (string, bool) {
+	if isYouTubeThumbnailHost(bareHost(r)) {
+		return "", false
+	}
+	id := extractYouTubeVideoID(r, body)
+	if id == "" {
+		return "", false
+	}
+
+	now := time.Now()
+	h.blockedYouTubeMu.Lock()
+	entry, ok := h.blockedYouTubeVideos[id]
+	if ok && now.After(entry.expiresAt) {
+		delete(h.blockedYouTubeVideos, id)
+		ok = false
+	}
+	h.blockedYouTubeMu.Unlock()
+	if !ok {
+		return "", false
+	}
+	return nonEmptyReason("youtube_video_blocked_by_thumbnail:"+entry.reason, "youtube_video_blocked_by_thumbnail"), true
+}
+
+func extractYouTubeVideoID(r *http.Request, body []byte) string {
+	host := bareHost(r)
+	path := strings.Trim(r.URL.Path, "/")
+
+	if isYouTubeThumbnailHost(host) {
+		parts := strings.Split(path, "/")
+		for i, part := range parts {
+			switch part {
+			case "vi", "vi_webp", "an_webp":
+				if i+1 < len(parts) {
+					return cleanYouTubeVideoID(parts[i+1])
+				}
+			}
+		}
+		return ""
+	}
+
+	if host == "youtu.be" && path != "" {
+		return cleanYouTubeVideoID(strings.Split(path, "/")[0])
+	}
+
+	if !isYouTubeHost(host) {
+		return ""
+	}
+
+	if r.URL.Query().Get("v") != "" {
+		return cleanYouTubeVideoID(r.URL.Query().Get("v"))
+	}
+
+	parts := strings.Split(path, "/")
+	if len(parts) >= 2 {
+		switch parts[0] {
+		case "shorts", "embed", "live":
+			return cleanYouTubeVideoID(parts[1])
+		}
+	}
+
+	return extractYouTubeVideoIDFromBody(body)
+}
+
+func extractYouTubeVideoIDFromBody(body []byte) string {
+	text := string(body)
+	for {
+		idx := strings.Index(text, `"videoId"`)
+		if idx < 0 {
+			return ""
+		}
+		text = text[idx+len(`"videoId"`):]
+		colon := strings.Index(text, ":")
+		if colon < 0 {
+			return ""
+		}
+		text = strings.TrimLeft(text[colon+1:], " \t\r\n")
+		if len(text) == 0 || text[0] != '"' {
+			continue
+		}
+		text = text[1:]
+		end := strings.IndexByte(text, '"')
+		if end < 0 {
+			return ""
+		}
+		if id := cleanYouTubeVideoID(text[:end]); id != "" {
+			return id
+		}
+		text = text[end+1:]
+	}
+}
+
+func cleanYouTubeVideoID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if cut := strings.IndexAny(raw, `?&#/"' `); cut >= 0 {
+		raw = raw[:cut]
+	}
+	if len(raw) < 6 || len(raw) > 32 {
+		return ""
+	}
+	for _, ch := range raw {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			continue
+		}
+		return ""
+	}
+	return raw
+}
+
+func bareHost(r *http.Request) string {
+	host := r.Host
+	if r.URL.Host != "" {
+		host = r.URL.Host
+	}
+	bare, _, err := net.SplitHostPort(host)
+	if err == nil {
+		host = bare
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+// clientIP returns the source IP of the request, preferring the explicit
+// X-Forwarded-For header (some upstream bypass setups inject it) and falling
+// back to RemoteAddr. Returns "" when nothing is available.
+func clientIP(r *http.Request) string {
+	if h := r.Header.Get("X-Forwarded-For"); h != "" {
+		if comma := strings.IndexByte(h, ','); comma > 0 {
+			h = h[:comma]
+		}
+		if ip := strings.TrimSpace(h); ip != "" {
+			return ip
+		}
+	}
+	if r.RemoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func isYouTubeHost(host string) bool {
+	return host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "music.youtube.com" || host == "youtube-nocookie.com" || strings.HasSuffix(host, ".youtube.com") || strings.HasSuffix(host, ".youtube-nocookie.com")
+}
+
+func isYouTubeThumbnailHost(host string) bool {
+	return host == "ytimg.com" || strings.HasSuffix(host, ".ytimg.com") || host == "img.youtube.com"
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +823,42 @@ func (h *Handler) roundTrip(r *http.Request) (*http.Response, error) {
 	}
 	// Strip Proxy-Authorization so it doesn't leak upstream.
 	r.Header.Del("Proxy-Authorization")
+	// Let Go's transport negotiate/decode gzip itself. Forwarding the browser's
+	// br/gzip header gives us compressed HTML/JSON bytes, which breaks text
+	// extraction and gRPC string marshaling.
+	r.Header.Del("Accept-Encoding")
 	return transport.RoundTrip(r)
+}
+
+func (h *Handler) refetchFullVideoIfNeeded(r *http.Request, resp *http.Response) *http.Response {
+	if r.Method != http.MethodGet || r.Header.Get("Range") == "" {
+		return resp
+	}
+	if resp.StatusCode != http.StatusPartialContent || !isVideo(resp.Header.Get("Content-Type")) {
+		return resp
+	}
+
+	retry := r.Clone(r.Context())
+	retry.Header = r.Header.Clone()
+	retry.Header.Del("Range")
+	retry.Header.Del("If-Range")
+	retry.Header.Del("If-None-Match")
+	retry.Header.Del("If-Modified-Since")
+
+	fullResp, err := h.roundTrip(retry)
+	if err != nil {
+		slog.Warn("video full-body refetch failed", "err", err, "url", r.URL.String())
+		return resp
+	}
+	if !isVideo(fullResp.Header.Get("Content-Type")) {
+		slog.Warn("video full-body refetch returned non-video", "url", r.URL.String(), "content_type", fullResp.Header.Get("Content-Type"))
+		_ = fullResp.Body.Close()
+		return resp
+	}
+
+	_ = resp.Body.Close()
+	slog.Info("video range refetched for inspection", "url", r.URL.String(), "status", fullResp.StatusCode)
+	return fullResp
 }
 
 var hopHeaders = []string{
@@ -481,6 +878,17 @@ func copyHeaders(dst, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
+	// Do not advertise alternate HTTP/3 routes to clients using the MITM proxy.
+	dst.Del("Alt-Svc")
+	dst.Del("Alt-Used")
+}
+
+func markNoStore(h http.Header) {
+	h.Set("Cache-Control", "no-store, private")
+	h.Set("Pragma", "no-cache")
+	h.Set("Expires", "0")
+	h.Del("ETag")
+	h.Del("Last-Modified")
 }
 
 // ---------------------------------------------------------------------------
@@ -489,12 +897,33 @@ func copyHeaders(dst, src http.Header) {
 
 // peekBody reads up to limit bytes from rc and returns the snapshot plus a
 // new io.ReadCloser that replays the full body (snapshot + remainder).
+//
+// limit==0 falls back to 10 MiB; for an explicit "send everything" pass a
+// very large value (e.g. math.MaxInt64). io.ReadAll grows its buffer
+// dynamically, so a huge limit doesn't pre-allocate.
 func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
+	if limit <= 0 {
+		limit = 10 << 20
+	}
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
 		return nil, rc
 	}
 	return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
+}
+
+// limitFor returns the per-content-type byte cap. Falls back to the legacy
+// MaxInspectBytes when a per-type cap isn't configured.
+func (h *Handler) limitFor(ct string) int64 {
+	switch {
+	case isImage(ct) && h.cfg.MaxImageBytes > 0:
+		return h.cfg.MaxImageBytes
+	case isVideo(ct) && h.cfg.MaxVideoBytes > 0:
+		return h.cfg.MaxVideoBytes
+	case textextract.IsSupported(ct) && h.cfg.MaxTextBytes > 0:
+		return h.cfg.MaxTextBytes
+	}
+	return h.cfg.MaxInspectBytes
 }
 
 // ---------------------------------------------------------------------------
@@ -541,8 +970,10 @@ func (h *Handler) isBypass(host string) bool {
 // Block page
 // ---------------------------------------------------------------------------
 
-func writeBlockPage(w http.ResponseWriter, rawURL string) {
+func writeBlockPage(w http.ResponseWriter, rawURL string, reason string) {
+	reason = nonEmptyReason(reason, "unspecified_block")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	markNoStore(w.Header())
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="en">
@@ -550,9 +981,208 @@ func writeBlockPage(w http.ResponseWriter, rawURL string) {
 <body>
 <h1>This page has been blocked</h1>
 <p>URL: <code>%s</code></p>
+<p>Reason: <code>%s</code></p>
 <p>If you think this is a mistake, contact your administrator.</p>
 </body>
-</html>`, html.EscapeString(rawURL))
+</html>`, html.EscapeString(rawURL), html.EscapeString(reason))
+}
+
+func writeBlockedResponse(w http.ResponseWriter, rawURL string, reason string, contentType string, body []byte) {
+	if isImage(contentType) {
+		writeBlockImage(w, reason, body)
+		return
+	}
+	writeBlockPage(w, rawURL, reason)
+}
+
+func writeBlockImage(w http.ResponseWriter, reason string, raw []byte) {
+	reason = nonEmptyReason(reason, "unspecified_block")
+	width, height := blockedImageDimensions(raw)
+	body := blockedImageSVG(width, height, reason)
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("X-See-No-Evil-Blocked", "true")
+	markNoStore(w.Header())
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func blockedImageDimensions(raw []byte) (int, int) {
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil && cfg.Width > 0 && cfg.Height > 0 {
+		return cfg.Width, cfg.Height
+	}
+	if width, height, ok := avifDimensions(raw); ok {
+		return width, height
+	}
+	if width, height, ok := svgDimensions(raw); ok {
+		return width, height
+	}
+	return 640, 360
+}
+
+func avifDimensions(raw []byte) (int, int, bool) {
+	return findISOBMFFDimensions(raw, 0)
+}
+
+func findISOBMFFDimensions(raw []byte, depth int) (int, int, bool) {
+	if depth > 8 {
+		return 0, 0, false
+	}
+	for offset := 0; offset+8 <= len(raw); {
+		size := uint64(binary.BigEndian.Uint32(raw[offset : offset+4]))
+		boxType := string(raw[offset+4 : offset+8])
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(raw) {
+				return 0, 0, false
+			}
+			size = binary.BigEndian.Uint64(raw[offset+8 : offset+16])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(raw) - offset)
+		}
+		if size < headerSize || uint64(offset)+size > uint64(len(raw)) {
+			return 0, 0, false
+		}
+		payloadStart := offset + int(headerSize)
+		payloadEnd := offset + int(size)
+		payload := raw[payloadStart:payloadEnd]
+
+		if boxType == "ispe" && len(payload) >= 12 {
+			width := int(binary.BigEndian.Uint32(payload[4:8]))
+			height := int(binary.BigEndian.Uint32(payload[8:12]))
+			if width > 0 && height > 0 {
+				return width, height, true
+			}
+		}
+
+		childPayload := payload
+		if boxType == "meta" {
+			if len(payload) < 4 {
+				offset += int(size)
+				continue
+			}
+			childPayload = payload[4:]
+		}
+		if isContainerBox(boxType) {
+			if width, height, ok := findISOBMFFDimensions(childPayload, depth+1); ok {
+				return width, height, true
+			}
+		}
+
+		offset += int(size)
+	}
+	return 0, 0, false
+}
+
+func isContainerBox(boxType string) bool {
+	switch boxType {
+	case "meta", "iprp", "ipco":
+		return true
+	default:
+		return false
+	}
+}
+
+func blockedImageSVG(width, height int, reason string) []byte {
+	if width <= 0 {
+		width = 640
+	}
+	if height <= 0 {
+		height = 360
+	}
+	fontSize := clampInt(minInt(width/12, height/5), 14, 48)
+	subSize := clampInt(fontSize/2, 10, 20)
+	pad := clampInt(minInt(width, height)/18, 10, 32)
+	textY := height/2 - fontSize/3
+	subY := height/2 + fontSize
+	if textY < pad+fontSize {
+		textY = pad + fontSize
+	}
+	if subY > height-pad {
+		subY = height - pad
+	}
+
+	return []byte(fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" aria-label="see no evil blocked">
+	<rect width="100%%" height="100%%" fill="#111827"/>
+	<rect x="%d" y="%d" width="%d" height="%d" rx="6" fill="none" stroke="#f97316" stroke-width="2" opacity="0.9"/>
+	<text x="50%%" y="%d" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="%d" font-weight="700" fill="#f9fafb">see no evil blocked</text>
+	<text x="50%%" y="%d" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="%d" fill="#d1d5db">%s</text>
+</svg>`, width, height, width, height, pad, pad, maxInt(width-2*pad, 1), maxInt(height-2*pad, 1), textY, fontSize, subY, subSize, html.EscapeString(reason)))
+}
+
+func svgDimensions(raw []byte) (int, int, bool) {
+	type svgRoot struct {
+		XMLName xml.Name `xml:"svg"`
+		Width   string   `xml:"width,attr"`
+		Height  string   `xml:"height,attr"`
+		ViewBox string   `xml:"viewBox,attr"`
+	}
+	var root svgRoot
+	if err := xml.NewDecoder(bytes.NewReader(raw)).Decode(&root); err != nil || root.XMLName.Local != "svg" {
+		return 0, 0, false
+	}
+	width, widthOK := parseSVGLength(root.Width)
+	height, heightOK := parseSVGLength(root.Height)
+	if widthOK && heightOK {
+		return width, height, true
+	}
+	parts := strings.Fields(strings.ReplaceAll(root.ViewBox, ",", " "))
+	if len(parts) == 4 {
+		vbWidth, vbWidthOK := parseSVGLength(parts[2])
+		vbHeight, vbHeightOK := parseSVGLength(parts[3])
+		if vbWidthOK && vbHeightOK {
+			return vbWidth, vbHeight, true
+		}
+	}
+	return 0, 0, false
+}
+
+func parseSVGLength(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasSuffix(value, "%") {
+		return 0, false
+	}
+	end := 0
+	for end < len(value) {
+		ch := value[end]
+		if (ch < '0' || ch > '9') && ch != '.' {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(value[:end], 64)
+	if err != nil || parsed <= 0 {
+		return 0, false
+	}
+	return int(parsed + 0.5), true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clampInt(v, low, high int) int {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
 }
 
 // ---------------------------------------------------------------------------

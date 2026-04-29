@@ -25,6 +25,15 @@ def _make_jpeg(width: int = 64, height: int = 64) -> bytes:
     return buf.getvalue()
 
 
+def _make_svg() -> bytes:
+    return b"""
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+            <rect width="64" height="64" fill="#6496c8"/>
+            <circle cx="32" cy="32" r="18" fill="#ffffff"/>
+        </svg>
+        """
+
+
 @pytest.fixture()
 def mock_session():
     """Fake ONNX InferenceSession that returns all-zero logits."""
@@ -39,6 +48,16 @@ def test_preprocess_returns_nchw():
     from seenoevil_image_classifier.server import _preprocess
 
     tensor = _preprocess(_make_jpeg())
+    assert tensor.shape == (1, 3, 224, 224)
+    assert tensor.dtype == np.float32
+    assert tensor.min() >= 0.0
+    assert tensor.max() <= 1.0
+
+
+def test_preprocess_svg_returns_nchw():
+    from seenoevil_image_classifier.server import _preprocess
+
+    tensor = _preprocess(_make_svg())
     assert tensor.shape == (1, 3, 224, 224)
     assert tensor.dtype == np.float32
     assert tensor.min() >= 0.0

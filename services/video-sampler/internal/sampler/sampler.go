@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,6 +67,9 @@ type Config struct {
 	// FFmpegPath is the executable to invoke (default "ffmpeg"). Override in
 	// tests to point at a fake script.
 	FFmpegPath string
+	// FFprobePath is used to probe the video duration so frames can be sampled
+	// evenly across the whole timeline (default "ffprobe").
+	FFprobePath string
 	// ThumbnailWidth scales the worst-frame thumbnail down before storage.
 	ThumbnailWidth int
 	// ThumbnailJPEGQ sets the JPEG quality of the thumbnail (1..31, lower is
@@ -84,10 +88,13 @@ func NewServer(cfg Config) *Server {
 		cfg.DefaultFrames = 8
 	}
 	if cfg.MaxVideoBytes <= 0 {
-		cfg.MaxVideoBytes = 50 << 20
+		cfg.MaxVideoBytes = 500 << 20
 	}
 	if cfg.FFmpegPath == "" {
 		cfg.FFmpegPath = "ffmpeg"
+	}
+	if cfg.FFprobePath == "" {
+		cfg.FFprobePath = "ffprobe"
 	}
 	if cfg.ThumbnailWidth <= 0 {
 		cfg.ThumbnailWidth = 256
@@ -203,25 +210,43 @@ func receiveStream(stream classifyv1.VideoSampler_SampleServer, dest string, max
 
 // extractFrames runs ffmpeg to pull `count` evenly-spaced JPEG frames from
 // `videoPath` into `dir`. Returns the absolute paths of the extracted frames.
+//
+// Strategy: probe the duration with ffprobe and ask ffmpeg for an effective
+// frame rate of `count/duration` so the output is exactly `count` frames
+// evenly spread across the whole video. Falls back to the legacy `thumbnail`
+// filter when ffprobe fails (e.g. truncated stream with no moov atom).
 func (s *Server) extractFrames(ctx context.Context, videoPath, dir string, count int) ([]string, error) {
 	if count <= 0 {
 		count = s.cfg.DefaultFrames
 	}
 	pattern := filepath.Join(dir, "frame-%03d.jpg")
 
-	// Filter: pick `count` evenly-spaced frames. `select=not(mod(...))` would
-	// require knowing the frame count up front; the simpler approach is to
-	// ask ffmpeg for a target frame rate computed from the input duration,
-	// but that needs ffprobe. The robust portable trick is `thumbnail=N`
-	// which selects one representative frame per N input frames, paired with
-	// `-frames:v count` to cap the total. For our use-case we don't need
-	// perfect spacing — we need *some* representative frames.
+	dur, probeErr := s.probeDuration(ctx, videoPath)
+	var vf string
+	switch {
+	case probeErr == nil && dur > 0.5:
+		// fps = count / duration places one frame every duration/count seconds.
+		// Cap fps at 30 in case the video is very short.
+		fps := float64(count) / dur
+		if fps > 30 {
+			fps = 30
+		}
+		vf = fmt.Sprintf("fps=%.6f,scale=%d:-1", fps, s.cfg.ThumbnailWidth)
+	default:
+		// Fallback: pick representative frames from each scene change. Not
+		// evenly-spaced but at least diverse.
+		vf = "thumbnail,scale=" + strconv.Itoa(s.cfg.ThumbnailWidth) + ":-1"
+		if probeErr != nil {
+			slog.Debug("ffprobe failed; using thumbnail filter", "err", probeErr)
+		}
+	}
+
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-y",
 		"-i", videoPath,
-		"-vf", "thumbnail," + "scale=" + strconv.Itoa(s.cfg.ThumbnailWidth) + ":-1",
+		"-vf", vf,
 		"-frames:v", strconv.Itoa(count),
 		"-q:v", strconv.Itoa(s.cfg.ThumbnailJPEGQ),
 		pattern,
@@ -240,6 +265,25 @@ func (s *Server) extractFrames(ctx context.Context, videoPath, dir string, count
 	return matches, nil
 }
 
+// probeDuration returns the video duration in seconds via ffprobe.
+func (s *Server) probeDuration(ctx context.Context, videoPath string) (float64, error) {
+	cmd := exec.CommandContext(ctx, s.cfg.FFprobePath, //nolint:gosec // FFprobePath is admin-controlled
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		videoPath,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe: %w", err)
+	}
+	dur, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse duration %q: %w", out, err)
+	}
+	return dur, nil
+}
+
 // classifyFrames sends each extracted frame to the image classifier and
 // reduces the per-frame results to a single worst-case verdict.
 //
@@ -252,7 +296,7 @@ func (s *Server) classifyFrames(
 	requestID string,
 ) ([]*classifyv1.Score, int, classifyv1.Action, string) {
 	if len(frames) == 0 {
-		return nil, 0, classifyv1.Action_ACTION_ALLOW, "no_frames"
+		return nil, 0, classifyv1.Action_ACTION_ALLOW, "video_sampler:no_frames_failed"
 	}
 
 	maxScores := map[string]float32{}
@@ -288,6 +332,9 @@ func (s *Server) classifyFrames(
 			worstAction = classifyv1.Action_ACTION_WARN
 			worstReason = "video:" + res.Reason
 		}
+	}
+	if scored == 0 {
+		return nil, 0, classifyv1.Action_ACTION_ALLOW, "video_sampler:classification_failed"
 	}
 
 	out := make([]*classifyv1.Score, 0, len(maxScores))

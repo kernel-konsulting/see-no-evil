@@ -2,6 +2,8 @@
 
 Python + ONNX Runtime gRPC service. Loads the configured model
 (`classifiers.image.model`) and returns per-class scores for each input image.
+JPEG, PNG, GIF, WebP, and AVIF are decoded through Pillow. SVG inputs are
+rasterized to the model input size before scoring.
 
 **M0:** Dockerfile stub only.
 

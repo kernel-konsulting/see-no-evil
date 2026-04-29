@@ -50,9 +50,19 @@ COPY services/proxy/ .
 RUN go build -trimpath -ldflags="-s -w" -o /proxy .
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
+# Stage A: prepare /data owned by the nonroot UID (65532) used by distroless.
+# When this directory is later mounted as a fresh Docker/Podman volume, the
+# container engine copies the image contents — including ownership — into the
+# new volume, so the proxy can write to /data/ca on first run.
+FROM busybox:1.36 AS dataprep
+RUN mkdir -p /seed/data/ca \
+ && chown -R 65532:65532 /seed/data \
+ && chmod    0755       /seed/data /seed/data/ca
+
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 COPY --from=builder /proxy /proxy
+COPY --from=dataprep --chown=65532:65532 /seed/data /data
 
 # HTTP proxy port (clients point their proxy settings here)
 EXPOSE 8080

@@ -28,11 +28,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 from .config import AppConfig
 
 Decision = Literal["allow", "block"]
+
+_NON_BLOCKING_CLASSIFIER_LABELS = {"neutral", "drawing", "drawings"}
 
 
 @dataclass(frozen=True)
@@ -72,11 +74,26 @@ class ProfileView:
     quota_minutes_per_day: int
     allow_domains: list[str]
     deny_domains: list[str]
+    enforce_allowlist: bool = False
     # URL substring patterns (case-insensitive) matched against path+query.
     deny_url_keywords: list[str] = field(default_factory=list)
     # YouTube channel identifiers/handles (e.g. "@LinusTechTips" or "UCxxxx").
     allow_youtube_channels: list[str] = field(default_factory=list)
     deny_youtube_channels: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GlobalRules:
+    allow_domains: list[str] = field(default_factory=list)
+    enforce_allowlist: bool = False
+    deny_domains: list[str] = field(default_factory=list)
+    deny_url_keywords: list[str] = field(default_factory=list)
+    apply_domain_rules: bool = True
+    apply_url_rules: bool = True
+    # Optional override thresholds for image classifier labels (e.g.
+    # {"sexy": 0.6}). Profile thresholds still take precedence; otherwise
+    # the runtime override applies, falling back to the global config.
+    image_thresholds: dict[str, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +178,14 @@ def _host_matches(pattern: str, host: str) -> bool:
 
 
 def _match_any(patterns: list[str], host: str) -> bool:
-    return any(_host_matches(p, host) for p in patterns)
+    return _matched_pattern(patterns, host) is not None
+
+
+def _matched_pattern(patterns: list[str], host: str) -> str | None:
+    for pattern in patterns:
+        if _host_matches(pattern, host):
+            return pattern.strip().lower().lstrip(".")
+    return None
 
 
 def _host_of(url: str) -> str:
@@ -175,6 +199,21 @@ def _path_query_of(url: str) -> str:
     if parsed.query:
         pq = f"{pq}?{parsed.query}"
     return pq
+
+
+def _url_keyword_text(url: str) -> str:
+    parsed = urlparse(url if "://" in url else f"//{url}", scheme="http")
+    pieces = [url, parsed.netloc, parsed.path, parsed.query]
+    return unquote_plus(" ".join(pieces)).lower()
+
+
+def _matched_keyword(keywords: list[str], url: str) -> str | None:
+    text = _url_keyword_text(url)
+    for keyword in keywords:
+        kw = keyword.strip().lower()
+        if kw and kw in text:
+            return kw
+    return None
 
 
 def _is_youtube_host(host: str) -> bool:
@@ -227,6 +266,7 @@ def decide(
     inputs: DecisionInput,
     *,
     config: AppConfig | None = None,
+    global_rules: GlobalRules | None = None,
 ) -> DecisionOutput:
     """Evaluate the policy for one request and return an allow/block decision."""
     # 0. Panic-relax — admin override that short-circuits everything below.
@@ -245,21 +285,41 @@ def decide(
         return DecisionOutput("block", "quota")
 
     host = _host_of(inputs.url)
+    global_rules = global_rules or GlobalRules()
+
+    if global_rules.apply_domain_rules:
+        if host and (match := _matched_pattern(global_rules.deny_domains, host)):
+            return DecisionOutput("block", f"global_deny_domain:{match}")
+        if host and (match := _matched_pattern(global_rules.allow_domains, host)):
+            return DecisionOutput("allow", f"global_allow_domain:{match}")
+        if (
+            global_rules.enforce_allowlist
+            and global_rules.allow_domains
+            and (not host or not _match_any(global_rules.allow_domains, host))
+        ):
+            return DecisionOutput("block", f"global_not_in_allowlist:{host or 'unknown'}")
+
+    if global_rules.apply_url_rules and (
+        match := _matched_keyword(global_rules.deny_url_keywords, inputs.url)
+    ):
+        return DecisionOutput("block", f"global_deny_keyword:{match}")
 
     # 3. Deny list (always wins over allow on the same host: safer default).
-    if host and _match_any(profile.deny_domains, host):
-        return DecisionOutput("block", "deny_domain")
+    if (
+        global_rules.apply_domain_rules
+        and host
+        and (match := _matched_pattern(profile.deny_domains, host))
+    ):
+        return DecisionOutput("block", f"deny_domain:{match}")
 
     # 4. URL keyword/substring deny (case-insensitive on path+query).
-    if profile.deny_url_keywords:
-        pq = _path_query_of(inputs.url).lower()
-        for kw in profile.deny_url_keywords:
-            kw_norm = kw.strip().lower()
-            if kw_norm and kw_norm in pq:
-                return DecisionOutput("block", "deny_keyword")
+    if global_rules.apply_url_rules and (
+        match := _matched_keyword(profile.deny_url_keywords, inputs.url)
+    ):
+        return DecisionOutput("block", f"deny_keyword:{match}")
 
     # 5. YouTube channel allow/deny (only when host is YouTube).
-    if host and _is_youtube_host(host):
+    if global_rules.apply_domain_rules and host and _is_youtube_host(host):
         channel = _extract_youtube_channel(inputs.url)
         if channel is not None:
             if any(_channel_matches(p, channel) for p in profile.deny_youtube_channels):
@@ -273,20 +333,37 @@ def decide(
             # info (e.g. /watch?v=...): conservative → block.
             return DecisionOutput("block", "youtube_channel_not_allowed")
 
-    # 6. Allow list (presence implies allow-list-only mode)
-    if profile.allow_domains and (not host or not _match_any(profile.allow_domains, host)):
-        return DecisionOutput("block", "not_in_allowlist")
+    # 6. Allow list (only enforced if enforce_allowlist is true)
+    if (
+        global_rules.apply_domain_rules
+        and host
+        and (match := _matched_pattern(profile.allow_domains, host))
+    ):
+        return DecisionOutput("allow", f"allow_domain:{match}")
+    if (
+        global_rules.apply_domain_rules
+        and profile.enforce_allowlist
+        and profile.allow_domains
+        and (not host or not _match_any(profile.allow_domains, host))
+    ):
+        return DecisionOutput("block", f"not_in_allowlist:{host or 'unknown'}")
 
     # 7. Classifier thresholds
     global_image = config.classifiers.image.thresholds.model_dump() if config is not None else {}
+    runtime_image = global_rules.image_thresholds
     for cls, score in inputs.classifier_scores.items():
-        threshold = profile.image_thresholds.get(cls)
+        label = cls.split(":", 1)[1] if ":" in cls else cls
+        if label in _NON_BLOCKING_CLASSIFIER_LABELS:
+            continue
+        threshold = profile.image_thresholds.get(label)
         if threshold is None:
-            threshold = global_image.get(cls)
+            threshold = runtime_image.get(label)
+        if threshold is None:
+            threshold = global_image.get(label)
         if threshold is None:
             continue
         if score >= threshold:
-            return DecisionOutput("block", f"classifier:{cls}")
+            return DecisionOutput("block", f"classifier:{label}")
 
     return DecisionOutput("allow", "default")
 

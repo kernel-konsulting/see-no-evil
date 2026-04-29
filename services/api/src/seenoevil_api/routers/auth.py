@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import oidc
@@ -18,7 +19,17 @@ from ..config import AppConfig
 from ..schemas import LoginRequest, LoginResponse, OIDCStartResponse, SetupRequest
 
 
-def make_router(get_session_dep, get_config) -> APIRouter:
+class MeResponse(BaseModel):
+    email: str
+    role: str
+
+
+class OIDCInfo(BaseModel):
+    enabled: bool
+    label: str = "Sign in with SSO"
+
+
+def make_router(get_session_dep, get_config, current_user) -> APIRouter:
     r = APIRouter(prefix="/v1/auth", tags=["auth"])
 
     @r.post("/setup", response_model=LoginResponse)
@@ -49,6 +60,16 @@ def make_router(get_session_dep, get_config) -> APIRouter:
     @r.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
     def logout(response: Response) -> None:
         clear_session(response)
+
+    @r.get("/me", response_model=MeResponse)
+    def me(current: tuple[str, str] = Depends(current_user)) -> MeResponse:
+        email, role = current
+        return MeResponse(email=email, role=role)
+
+    @r.get("/oidc/info", response_model=OIDCInfo)
+    def oidc_info(config: AppConfig = Depends(get_config)) -> OIDCInfo:
+        cfg = config.auth.oidc
+        return OIDCInfo(enabled=bool(cfg.enabled and cfg.redirect_url))
 
     @r.get("/oidc/start", response_model=OIDCStartResponse)
     def oidc_start(

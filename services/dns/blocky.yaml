@@ -53,7 +53,8 @@ caching:
   maxTime: 30m
   maxItemsCount: 10000
   prefetching: true
-  prefetchExpiration: 2h
+  # `prefetchExpires` (renamed from prefetchExpiration in newer Blocky)
+  prefetchExpires: 2h
 
 # ---------------------------------------------------------------------------
 # Query log — Blocky writes JSON logs; Vector picks them up.

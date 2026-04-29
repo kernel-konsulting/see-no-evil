@@ -15,8 +15,33 @@ policy decision returned by the API.
 - Inject SafeSearch cookies / query params per `proxy.safesearch`.
 - Stream bodies up to `proxy.max_inspect_body` to classifiers; pass through
   larger ones.
+- Re-fetch ranged `video/*` responses as full bodies before sampling so MP4
+  range requests do not bypass frame inspection.
 - Look up source → device → profile via the API.
 - Emit per-decision audit records.
+- Attach clear audit thumbnails for decoded image responses. JPEG, PNG, GIF,
+  and WebP are decoded locally; unsupported image formats still classify but
+  may show the UI placeholder.
+- Mark inspected responses and local block pages as `Cache-Control: no-store`
+  so long-lived browser caches do not keep serving previously allowed images
+  after classifier behavior changes.
+- For blocked image responses, return a no-store SVG replacement sized from
+  the original image where possible and labelled `see no evil blocked`.
+- Fail closed for video sampler infrastructure/decode failures; unscannable
+  videos are blocked with a `classifier:video:*` reason instead of silently
+  passing through.
+- Log every blocked request with a non-empty `reason` field so operators can
+  tell whether the block came from a classifier, policy rule, quota, schedule,
+  or global list.
+
+## Block logging
+
+Every request that returns the local block page emits a structured INFO log
+entry named `request blocked` with `url`, `method`, `host`, `content_type`,
+`device_mac`, and `reason`. Classifier-triggered blocks use reasons such as
+`classifier:image:porn`, `classifier:video:porn`, or `classifier:text:nsfw`;
+policy/API blocks use reasons like `deny_domain`, `global_deny_keyword`,
+`quota`, or `schedule`.
 
 ## Text inspection (M4)
 

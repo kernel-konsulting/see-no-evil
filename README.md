@@ -58,22 +58,26 @@ the **two completely separate TLS surfaces** (admin UI cert vs. MITM CA).
 ```bash
 git clone https://github.com/kernel-konsulting/see-no-evil.git
 cd see-no-evil
-cp config.example.yaml config.yaml
-# edit config.yaml — at minimum set pod.hostname
 
-# First-run wizard: seeds the admin account, generates the MITM CA, prompts
-# for a hostname and TLS mode.
-docker compose --profile setup run --rm sne-setup
+# Build all container images (or build individual services):
+./deploy/pods/seenoevil.sh build
 
-# Bring up the full stack:
-docker compose --profile core up -d
+# Start the pod (creates volumes, pod, and runs all containers):
+./deploy/pods/seenoevil.sh up
 
-# Optional add-ons:
-docker compose --profile core --profile observability up -d   # Grafana + alerts
-docker compose --profile core --profile vpn-tailscale up -d   # remote access
-docker compose --profile core --profile backup up -d          # local snapshots
+# Then visit https://seenoevil.lan
+# Admin email: admin@example.local
+# Password: changeme (or set via SNE_INITIAL_ADMIN_PASSWORD env var)
+```
 
-# Then visit https://seenoevil.lan and sign in with the admin you just created.
+For podman / docker compose deployments, see the [`deploy/compose/`](deploy/compose/) README.
+
+Useful commands:
+```bash
+./deploy/pods/seenoevil.sh logs <service>     # e.g., logs proxy
+./deploy/pods/seenoevil.sh status
+./deploy/pods/seenoevil.sh down                # stops the pod (volumes preserved)
+./deploy/pods/seenoevil.sh nuke                # down + remove volumes
 ```
 
 See [docs/backup.md](docs/backup.md), [docs/oidc.md](docs/oidc.md), and

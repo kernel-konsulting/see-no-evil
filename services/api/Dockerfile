@@ -39,7 +39,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 10001 app \
  && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app \
- && mkdir -p /data /etc/seenoevil \
+ && mkdir -p /data/models /data/lists /data/audit /data/backups /etc/seenoevil \
  && chown -R app:app /data /etc/seenoevil
 
 COPY --from=builder /install /usr/local

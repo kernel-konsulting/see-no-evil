@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -49,7 +50,17 @@ type ProxyConfig struct {
 		YouTubeRestricted bool `yaml:"youtube_restricted"`
 	} `yaml:"safesearch"`
 
-	MaxInspectBody string `yaml:"max_inspect_body"` // e.g. "10MiB"
+	MaxInspectBody string `yaml:"max_inspect_body"` // legacy fallback (e.g. "10MiB")
+
+	// Per-content-type inspection caps. Empty / 0 / "unlimited" means no
+	// truncation — the entire body is fed to the classifier. Images and text
+	// MUST be sent in full so classifiers can decode them; truncating an
+	// image past the header makes Pillow / ONNX reject the bytes outright.
+	// Video has a soft default cap because the sampler buffers to disk before
+	// extracting frames.
+	MaxImageBody string `yaml:"max_image_body"` // default: unlimited
+	MaxTextBody  string `yaml:"max_text_body"`  // default: unlimited
+	MaxVideoBody string `yaml:"max_video_body"` // default: 500MiB
 
 	TextInspection TextInspectionConfig `yaml:"text_inspection"`
 }
@@ -69,8 +80,42 @@ type TextInspectionConfig struct {
 }
 
 // MaxInspectBytes converts the IEC size string to bytes.
+//
+// Returns the legacy global cap. Prefer the per-type accessors below.
 func (p ProxyConfig) MaxInspectBytes() int64 {
 	return parseSize(p.MaxInspectBody, 10<<20) // default 10 MiB
+}
+
+// unlimited is the sentinel returned for "send everything" — large enough
+// that io.LimitReader effectively reads to EOF, small enough to fit in int64.
+const unlimited int64 = 1 << 62
+
+func parseLimit(s string, fallback int64) int64 {
+	trim := strings.ToLower(strings.TrimSpace(s))
+	switch trim {
+	case "":
+		return fallback
+	case "0", "unlimited", "none", "-1", "full":
+		return unlimited
+	}
+	return parseSize(s, fallback)
+}
+
+// MaxImageBytes returns the cap for image bodies. Default = unlimited so the
+// classifier always sees a complete, decodable image.
+func (p ProxyConfig) MaxImageBytes() int64 {
+	return parseLimit(p.MaxImageBody, unlimited)
+}
+
+// MaxTextBytes returns the cap for HTML/JSON/text bodies. Default = unlimited.
+func (p ProxyConfig) MaxTextBytes() int64 {
+	return parseLimit(p.MaxTextBody, unlimited)
+}
+
+// MaxVideoBytes returns the cap for buffered video bodies. Default = 500 MiB
+// (the sampler still streams frames evenly across whatever was buffered).
+func (p ProxyConfig) MaxVideoBytes() int64 {
+	return parseLimit(p.MaxVideoBody, 500<<20)
 }
 
 type ClassifiersConfig struct {
@@ -188,23 +233,39 @@ func envOr(key, fallback string) string {
 }
 
 // parseSize converts IEC size strings (10MiB, 2GiB) to bytes.
+//
+// Order matters: we must test the longest suffixes first because every IEC
+// suffix ends in "B" — iterating a map (random order) was matching "B" on
+// strings like "10MIB" and silently returning 10 bytes.
 func parseSize(s string, fallback int64) int64 {
 	if s == "" {
 		return fallback
 	}
-	units := map[string]int64{
-		"B": 1, "KIB": 1 << 10, "MIB": 1 << 20, "GIB": 1 << 30,
+	type unit struct {
+		suffix string
+		mult   int64
+	}
+	units := []unit{
+		{"GIB", 1 << 30},
+		{"MIB", 1 << 20},
+		{"KIB", 1 << 10},
+		{"B", 1},
 	}
 	s = strings.TrimSpace(strings.ToUpper(s))
-	for suffix, mult := range units {
-		if strings.HasSuffix(s, suffix) {
-			n := int64(0)
-			_, err := fmt.Sscan(strings.TrimSuffix(s, suffix), &n)
-			if err != nil {
-				return fallback
-			}
-			return n * mult
+	for _, u := range units {
+		if !strings.HasSuffix(s, u.suffix) {
+			continue
 		}
+		num := strings.TrimSpace(strings.TrimSuffix(s, u.suffix))
+		n, err := strconv.ParseInt(num, 10, 64)
+		if err != nil {
+			return fallback
+		}
+		return n * u.mult
+	}
+	// No suffix — try a bare integer (interpreted as bytes).
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
 	}
 	return fallback
 }

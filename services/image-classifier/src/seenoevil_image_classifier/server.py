@@ -24,9 +24,11 @@ import os
 import time
 from concurrent import futures
 from pathlib import Path
+from xml.etree import ElementTree
 
 import grpc
 import numpy as np
+import pillow_avif  # noqa: F401  # registers AVIF support with Pillow
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from PIL import Image
 from prometheus_client import Counter, Histogram, start_http_server
@@ -107,11 +109,44 @@ def _load_session(model_path: Path, device: str):
 
 # Input shape expected by the Freepik model: 224×224 RGB, normalised to [0,1].
 _INPUT_SIZE = (224, 224)
+_MAX_SVG_BYTES = 1_000_000
+
+
+def _looks_like_svg(image_bytes: bytes) -> bool:
+    head = image_bytes[:512].lstrip()
+    return head.startswith(b"<svg") or b"<svg" in head[:256]
+
+
+def _rasterize_svg(image_bytes: bytes) -> bytes:
+    if len(image_bytes) > _MAX_SVG_BYTES:
+        msg = f"SVG too large: {len(image_bytes)} bytes"
+        raise ValueError(msg)
+
+    try:
+        root = ElementTree.fromstring(image_bytes)
+    except ElementTree.ParseError as exc:
+        msg = f"invalid SVG XML: {exc}"
+        raise ValueError(msg) from exc
+
+    if not root.tag.endswith("svg"):
+        msg = "XML document is not an SVG"
+        raise ValueError(msg)
+
+    import cairosvg
+
+    return cairosvg.svg2png(
+        bytestring=image_bytes,
+        output_width=_INPUT_SIZE[0],
+        output_height=_INPUT_SIZE[1],
+    )
 
 
 def _preprocess(image_bytes: bytes) -> np.ndarray:
     """Convert raw image bytes → float32 NCHW tensor [1, 3, 224, 224]."""
     import io
+
+    if _looks_like_svg(image_bytes):
+        image_bytes = _rasterize_svg(image_bytes)
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize(_INPUT_SIZE, Image.BILINEAR)
@@ -152,7 +187,16 @@ class ImageClassifierServicer(classify_pb2_grpc.ImageClassifierServicer):  # typ
         try:
             tensor = _preprocess(request.image_data)
         except Exception as exc:
-            log.warning("image decode failed: %s", exc)
+            # Common: SVG, ICO, AVIF, malformed/truncated, or HTML error pages
+            # served with an image/* content-type. Log size + first bytes so the
+            # operator can tell what the proxy actually sent us.
+            head = bytes(request.image_data[:8])
+            log.warning(
+                "image decode failed: %s (size=%d, head=%s)",
+                exc,
+                len(request.image_data),
+                head.hex(),
+            )
             _model_errors.inc()
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"image decode error: {exc}")
@@ -180,6 +224,22 @@ class ImageClassifierServicer(classify_pb2_grpc.ImageClassifierServicer):  # typ
         _classify_total.labels(action=classify_pb2.Action.Name(action)).inc()
         _classify_latency.observe(time.perf_counter() - t0)
 
+        # Log every classification at DEBUG; log blocks at INFO so users can
+        # see them at default verbosity. Set LOG_LEVEL=DEBUG to see all.
+        top = sorted(scores_map.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        top_str = ", ".join(f"{k}={v:.3f}" for k, v in top)
+        action_name = classify_pb2.Action.Name(action)
+        if action == classify_pb2.ACTION_BLOCK:
+            log.info(
+                "image classify: %s reason=%s top=[%s] %dms",
+                action_name,
+                reason,
+                top_str,
+                latency_ms,
+            )
+        else:
+            log.debug("image classify: %s top=[%s] %dms", action_name, top_str, latency_ms)
+
         return classify_pb2.ClassifyImageResponse(
             scores=proto_scores,
             action=action,
@@ -194,10 +254,12 @@ class ImageClassifierServicer(classify_pb2_grpc.ImageClassifierServicer):  # typ
 
 
 def serve() -> None:
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    log.info("log level: %s", log_level)
 
     if not MODEL_PATH.exists():
         raise RuntimeError(

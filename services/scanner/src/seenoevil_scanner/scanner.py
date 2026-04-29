@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +39,10 @@ class ScannerConfig:
     interval_seconds: int = DEFAULT_INTERVAL_SECONDS
     api_base: str = "http://api:8000"
     api_token: str | None = None
-    metrics_port: int = 9102
+    # 9101 = image-classifier, 9102 = text-classifier — pick a free port for
+    # the scanner so it doesn't collide when sharing the pod's network ns.
+    metrics_port: int = 9105
+    control_port: int = 9104
     nmap_args: list[str] = field(default_factory=lambda: ["-sn", "-PR", "-n"])
     ready_path: str = "/tmp/scanner_ready"
 
@@ -56,6 +62,30 @@ def _parse_duration(value: str | int | None, default: int) -> int:
     return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
 
 
+def _detect_local_cidr() -> str | None:
+    """Best-effort: derive a /24 from the primary non-loopback IPv4 address.
+
+    Reads ``ip -4 -o addr`` and picks the first global-scope address. Returns
+    ``None`` if nothing usable is found.
+    """
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv
+            ["ip", "-4", "-o", "addr"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        # Example: "2: eth0    inet 10.88.0.23/16 brd 10.88.255.255 scope global eth0"
+        m = re.search(r"inet (\d+\.\d+\.\d+)\.\d+/\d+ .*scope global", line)
+        if m:
+            return f"{m.group(1)}.0/24"
+    return None
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
     raw: dict[str, Any] = {}
     if path is None:
@@ -65,16 +95,31 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
         if p.exists():
             raw = yaml.safe_load(p.read_text()) or {}
     sec = (raw.get("scanner") or {}) if isinstance(raw, dict) else {}
+    # Resolution order for CIDR:
+    #   1. SCANNER_CIDR env (operator override)
+    #   2. config.scanner.cidr  — but only if it's not the placeholder default
+    #   3. auto-detected from the scanner container's primary interface
+    #   4. hardcoded fallback
+    env_cidr = os.environ.get("SCANNER_CIDR")
+    cfg_cidr = sec.get("cidr")
+    if env_cidr:
+        cidr = env_cidr
+    elif cfg_cidr and cfg_cidr != DEFAULT_CIDR:
+        cidr = str(cfg_cidr)
+    else:
+        cidr = _detect_local_cidr() or DEFAULT_CIDR
+        log.info("auto-detected scan CIDR: %s", cidr)
     return ScannerConfig(
         enabled=bool(sec.get("enabled", False)),
-        cidr=str(sec.get("cidr") or os.environ.get("SCANNER_CIDR") or DEFAULT_CIDR),
+        cidr=cidr,
         interval_seconds=_parse_duration(
             sec.get("interval"),
             int(os.environ.get("SCANNER_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS)),
         ),
         api_base=os.environ.get("API_BASE", "http://api:8000").rstrip("/"),
         api_token=os.environ.get("API_TOKEN") or None,
-        metrics_port=int(os.environ.get("METRICS_PORT", 9102)),
+        metrics_port=int(os.environ.get("METRICS_PORT", 9105)),
+        control_port=int(os.environ.get("CONTROL_PORT", 9104)),
     )
 
 
@@ -187,6 +232,97 @@ _LAST_SCAN_TS = Gauge("scanner_last_scan_unixtime", "Unix timestamp of last scan
 
 
 _running = True
+_scan_lock = threading.Lock()
+
+
+def perform_scan(cfg: ScannerConfig) -> dict[str, Any]:
+    """Run a single scan and report it. Returns a result summary dict."""
+    with _scan_lock:
+        _SCAN_TOTAL.inc()
+        started = time.time()
+        try:
+            output = run_nmap(cfg.cidr, cfg.nmap_args)
+            devices = parse_nmap_output(output)
+            _DEVICES_SEEN.set(len(devices))
+            log.info("scan complete: %d devices on %s", len(devices), cfg.cidr)
+            api_result: dict[str, Any] = {}
+            if devices:
+                api_result = report_to_api(cfg, devices)
+                created = sum(1 for i in api_result.get("items", []) if i.get("created"))
+                log.info("reported %d devices to api (%d new)", len(devices), created)
+            _LAST_SCAN_TS.set(time.time())
+            result: dict[str, Any] = {
+                "ok": True,
+                "cidr": cfg.cidr,
+                "devices_found": len(devices),
+                "devices_created": sum(1 for i in api_result.get("items", []) if i.get("created")),
+                "duration_seconds": round(time.time() - started, 2),
+            }
+            if not devices:
+                local = _detect_local_cidr()
+                result["note"] = (
+                    f"No devices found on {cfg.cidr}. The scanner sees network "
+                    f"{local or 'unknown'} from inside its container. On rootless "
+                    "Podman / Docker Desktop the container cannot ARP-discover "
+                    "devices on the host LAN — deploy on a Linux gateway with "
+                    "--network=host (or run on the actual router) for real LAN "
+                    "discovery. You can still add devices manually."
+                )
+            return result
+        except subprocess.TimeoutExpired:
+            _SCAN_ERRORS.inc()
+            log.exception("nmap timed out")
+            return {"ok": False, "error": "nmap timed out"}
+        except httpx.HTTPError as exc:
+            _SCAN_ERRORS.inc()
+            log.warning("api report failed: %s", exc)
+            return {"ok": False, "error": f"api report failed: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            _SCAN_ERRORS.inc()
+            log.exception("scan failed")
+            return {"ok": False, "error": str(exc)}
+
+
+class _ControlHandler(BaseHTTPRequestHandler):
+    """Tiny HTTP control plane: POST /scan triggers an immediate sweep."""
+
+    cfg: ScannerConfig | None = None  # set by start_control_server
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        log.info("control: " + format, *args)
+
+    def _json(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/healthz":
+            self._json(200, {"status": "ok"})
+            return
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/scan":
+            if _ControlHandler.cfg is None:
+                self._json(503, {"error": "scanner not initialised"})
+                return
+            result = perform_scan(_ControlHandler.cfg)
+            self._json(200 if result.get("ok") else 500, result)
+            return
+        self._json(404, {"error": "not found"})
+
+
+def start_control_server(cfg: ScannerConfig) -> ThreadingHTTPServer:
+    _ControlHandler.cfg = cfg
+    srv = ThreadingHTTPServer(("0.0.0.0", cfg.control_port), _ControlHandler)  # noqa: S104
+    t = threading.Thread(target=srv.serve_forever, name="scanner-control", daemon=True)
+    t.start()
+    log.info("scanner control plane listening on :%d", cfg.control_port)
+    return srv
 
 
 def _signal_handler(signum: int, _frame: object) -> None:
@@ -209,11 +345,23 @@ def main() -> None:
     _setup_logging()
     cfg = load_config()
 
+    # Always start the control server so on-demand scans from the UI work even
+    # when the periodic loop is disabled.
+    try:
+        start_http_server(cfg.metrics_port)
+    except OSError as exc:
+        log.warning("metrics port %d unavailable: %s", cfg.metrics_port, exc)
+    start_control_server(cfg)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    _mark_ready(cfg.ready_path)
+
     if not cfg.enabled:
-        log.info("scanner disabled in config; sleeping (set scanner.enabled: true to enable)")
-        _mark_ready(cfg.ready_path)
-        signal.signal(signal.SIGTERM, _signal_handler)
-        signal.signal(signal.SIGINT, _signal_handler)
+        log.info(
+            "periodic scanner disabled in config (set scanner.enabled: true to enable). "
+            "On-demand scans via POST /scan still available on :%d",
+            cfg.control_port,
+        )
         while _running:
             time.sleep(60)
         return
@@ -224,33 +372,9 @@ def main() -> None:
         cfg.interval_seconds,
         cfg.api_base,
     )
-    start_http_server(cfg.metrics_port)
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
-    _mark_ready(cfg.ready_path)
 
     while _running:
-        _SCAN_TOTAL.inc()
-        try:
-            output = run_nmap(cfg.cidr, cfg.nmap_args)
-            devices = parse_nmap_output(output)
-            _DEVICES_SEEN.set(len(devices))
-            log.info("scan complete: %d devices", len(devices))
-            if devices:
-                result = report_to_api(cfg, devices)
-                created = sum(1 for i in result.get("items", []) if i.get("created"))
-                log.info("reported %d devices to api (%d new)", len(devices), created)
-        except subprocess.TimeoutExpired:
-            _SCAN_ERRORS.inc()
-            log.exception("nmap timed out")
-        except httpx.HTTPError as exc:
-            _SCAN_ERRORS.inc()
-            log.warning("api report failed: %s", exc)
-        except Exception:  # noqa: BLE001
-            _SCAN_ERRORS.inc()
-            log.exception("scan failed")
-        _LAST_SCAN_TS.set(time.time())
-
+        perform_scan(cfg)
         # Sleep in 1s ticks so SIGTERM is responsive.
         for _ in range(cfg.interval_seconds):
             if not _running:

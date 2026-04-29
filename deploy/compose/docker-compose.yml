@@ -45,7 +45,9 @@ networks:
 # Volumes
 # ---------------------------------------------------------------------------
 volumes:
-  data:        # /data — DB, CA, models, lists, audit, backups
+  data:        # /data — DB, models, audit, backups (root-owned, used by api/updater)
+  proxy_data:  # /data — MITM CA + per-host leaf cert cache (nonroot owned)
+  dns_data:    # /data — Blocky lists (blocky uid 100 owned)
   caddy_data:  # Caddy's internal CA + ACME state
   caddy_config:
   postgres_data:
@@ -61,7 +63,9 @@ services:
   # -------------------------------------------------------------------------
   sne-setup:
     profiles: [setup]
-    build: ../../services/api
+    build:
+      context: ../..
+      dockerfile: services/api/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-api:dev
     networks: [internal]
     volumes:
@@ -70,7 +74,7 @@ services:
       SEENOEVIL_DATA_DIR: /data
       # Pre-set these to skip interactive prompts in automated installs:
       # SEENOEVIL_INITIAL_ADMIN_EMAIL: admin@example.local
-      # SEENOEVIL_INITIAL_ADMIN_PASSWORD: changeme
+      SEENOEVIL_INITIAL_ADMIN_PASSWORD: changeme
       # SNE_HOSTNAME: seenoevil.lan
     entrypoint: ["seenoevil-setup"]
 
@@ -79,7 +83,9 @@ services:
   # -------------------------------------------------------------------------
   api:
     profiles: [core]
-    build: ../../services/api
+    build:
+      context: ../..
+      dockerfile: services/api/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-api:dev
     restart: unless-stopped
     networks: [internal]
@@ -98,7 +104,9 @@ services:
 
   ui:
     profiles: [core]
-    build: ../../services/ui
+    build:
+      context: ../..
+      dockerfile: services/ui/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-ui:dev
     restart: unless-stopped
     networks: [internal]
@@ -106,7 +114,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -114,13 +122,18 @@ services:
 
   caddy:
     profiles: [core]
-    build: ../../services/caddy
+    build:
+      context: ../..
+      dockerfile: services/caddy/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-caddy:dev
     restart: unless-stopped
     networks: [edge, internal]
     ports:
-      - "80:80"
-      - "443:443"
+      # Rootless Podman cannot bind privileged ports; defaults move them
+      # to the unprivileged range.  Set SNE_HTTP_PORT=80 / SNE_HTTPS_PORT=443
+      # when running as root or with capability NET_BIND_SERVICE.
+      - "${SNE_HTTP_PORT:-8088}:80"
+      - "${SNE_HTTPS_PORT:-8448}:443"
     volumes:
       - caddy_data:/data
       - caddy_config:/config
@@ -134,7 +147,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 15s
@@ -142,18 +155,21 @@ services:
 
   dns:
     profiles: [core]
-    build: ../../services/dns
+    build:
+      context: ../..
+      dockerfile: services/dns/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-dns:dev
     restart: unless-stopped
     # DNS lives on the edge: clients must be able to reach it.
     networks: [edge]
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
+      # Rootless Podman cannot bind privileged ports; override to 53 if needed.
+      - "${SNE_DNS_PORT_UDP:-1053}:53/udp"
+      - "${SNE_DNS_PORT_TCP:-1053}:53/tcp"
     volumes:
-      - data:/data
+      - dns_data:/data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/blocking/status"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/api/blocking/status"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -161,7 +177,9 @@ services:
 
   proxy:
     profiles: [core]
-    build: ../../services/proxy
+    build:
+      context: ../..
+      dockerfile: services/proxy/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-proxy:dev
     restart: unless-stopped
     networks: [edge, internal]
@@ -169,7 +187,10 @@ services:
       - "8080:8080"
       - "8443:8443"
     volumes:
-      - data:/data
+      - proxy_data:/data
+      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+    environment:
+      CONFIG_PATH: /etc/seenoevil/config.yaml
     depends_on:
       api:
         condition: service_healthy
@@ -180,7 +201,7 @@ services:
       video-sampler:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "/proxy", "-healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -188,7 +209,9 @@ services:
 
   image-classifier:
     profiles: [core]
-    build: ../../services/image-classifier
+    build:
+      context: ../..
+      dockerfile: services/image-classifier/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-image-classifier:dev
     restart: unless-stopped
     networks: [internal]
@@ -197,7 +220,9 @@ services:
 
   text-classifier:
     profiles: [core]
-    build: ../../services/text-classifier
+    build:
+      context: ../..
+      dockerfile: services/text-classifier/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-text-classifier:dev
     restart: unless-stopped
     networks: [internal]
@@ -206,7 +231,9 @@ services:
 
   video-sampler:
     profiles: [core]
-    build: ../../services/video-sampler
+    build:
+      context: ../..
+      dockerfile: services/video-sampler/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-video-sampler:dev
     restart: unless-stopped
     networks: [internal]
@@ -215,7 +242,9 @@ services:
   # The updater is the ONLY container with unrestricted egress.
   updater:
     profiles: [core]
-    build: ../../services/updater
+    build:
+      context: ../..
+      dockerfile: services/updater/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-updater:dev
     restart: unless-stopped
     networks: [edge]
@@ -227,7 +256,9 @@ services:
   # -------------------------------------------------------------------------
   scanner:
     profiles: [scanner]
-    build: ../../services/scanner
+    build:
+      context: ../..
+      dockerfile: services/scanner/Dockerfile
     image: ghcr.io/kernel-konsulting/seenoevil-scanner:dev
     restart: unless-stopped
     # Needs to see the LAN to scan it. Host networking is the simplest route;
@@ -303,64 +334,64 @@ services:
   # -------------------------------------------------------------------------
   # vpn-wg profile (optional)
   # -------------------------------------------------------------------------
-  wg-easy:
-    profiles: [vpn-wg]
-    image: ghcr.io/wg-easy/wg-easy
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-    ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"   # web UI
-    volumes:
-      - data:/etc/wireguard
+  # wg-easy:
+  #   profiles: [vpn-wg]
+  #   image: ghcr.io/wg-easy/wg-easy
+  #   restart: unless-stopped
+  #   cap_add:
+  #     - NET_ADMIN
+  #     - SYS_MODULE
+  #   sysctls:
+  #     - net.ipv4.ip_forward=1
+  #     - net.ipv4.conf.all.src_valid_mark=1
+  #   ports:
+  #     - "51820:51820/udp"
+  #     - "51821:51821/tcp"   # web UI
+  #   volumes:
+  #     - data:/etc/wireguard
 
   # -------------------------------------------------------------------------
   # backup profile (optional) — periodic local snapshots of the policy DB + CA.
   # Use this when you want point-in-time tarballs you can copy off-box.
   # For continuous replication, use the `litestream` profile instead.
   # -------------------------------------------------------------------------
-  backup:
-    profiles: [backup]
-    build: ../../services/api
-    image: ghcr.io/kernel-konsulting/seenoevil-api:dev
-    restart: unless-stopped
-    networks: [internal]
-    volumes:
-      - data:/data
-      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
-    environment:
-      SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
-      SNE_BACKUP_INTERVAL_SECONDS: "${SNE_BACKUP_INTERVAL_SECONDS:-86400}"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -eu
-        while true; do
-          seenoevil-backup snapshot || echo "snapshot failed (continuing)"
-          sleep "$$SNE_BACKUP_INTERVAL_SECONDS"
-        done
+  # backup:
+  #   profiles: [backup]
+  #   build: ../../services/api
+  #   image: ghcr.io/kernel-konsulting/seenoevil-api:dev
+  #   restart: unless-stopped
+  #   networks: [internal]
+  #   volumes:
+  #     - data:/data
+  #     - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+  #   environment:
+  #     SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+  #     SNE_BACKUP_INTERVAL_SECONDS: "${SNE_BACKUP_INTERVAL_SECONDS:-86400}"
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - |
+  #       set -eu
+  #       while true; do
+  #         seenoevil-backup snapshot || echo "snapshot failed (continuing)"
+  #         sleep "$$SNE_BACKUP_INTERVAL_SECONDS"
+  #       done
 
   # -------------------------------------------------------------------------
   # litestream profile (optional) — continuous replication of /data/policy.db
   # to an S3-compatible target. See docs/backup.md.
   # -------------------------------------------------------------------------
-  litestream:
-    profiles: [litestream]
-    image: litestream/litestream:0.3
-    restart: unless-stopped
-    networks: [edge]
-    volumes:
-      - data:/data
-      - ../../services/api/litestream.yml:/etc/litestream.yml:ro
-    environment:
-      LITESTREAM_ACCESS_KEY_ID: "${LITESTREAM_ACCESS_KEY_ID:-}"
-      LITESTREAM_SECRET_ACCESS_KEY: "${LITESTREAM_SECRET_ACCESS_KEY:-}"
-    command: ["replicate", "-config", "/etc/litestream.yml"]
+  # litestream:
+  #   profiles: [litestream]
+  #   image: litestream/litestream:0.3
+  #   restart: unless-stopped
+  #   networks: [edge]
+  #   volumes:
+  #     - data:/data
+  #     - ../../services/api/litestream.yml:/etc/litestream.yml:ro
+  #   environment:
+  #     LITESTREAM_ACCESS_KEY_ID: "${LITESTREAM_ACCESS_KEY_ID:-}"
+  #     LITESTREAM_SECRET_ACCESS_KEY: "${LITESTREAM_SECRET_ACCESS_KEY:-}"
+  #   command: ["replicate", "-config", "/etc/litestream.yml"]
 
   # -------------------------------------------------------------------------
   # observability profile (optional)
@@ -403,7 +434,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-changeme}"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:

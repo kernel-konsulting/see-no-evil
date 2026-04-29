@@ -30,8 +30,11 @@ func NewClient(baseURL string) *Client {
 type DecideRequest struct {
 	URL              string             `json:"url"`
 	DeviceMAC        string             `json:"device_mac,omitempty"`
+	ClientIP         string             `json:"client_ip,omitempty"`
 	ContentType      string             `json:"content_type,omitempty"`
 	ClassifierScores map[string]float32 `json:"classifier_scores,omitempty"`
+	Decision         string             `json:"decision,omitempty"`
+	Reason           string             `json:"reason,omitempty"`
 	// ThumbnailB64 is an optional blurred preview the API persists with the
 	// quarantine entry when the decision is "block".
 	ThumbnailB64 string `json:"thumbnail_b64,omitempty"`
