@@ -47,7 +47,7 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: make generate
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@v9.2.0
         with:
           version: v2.11.4
           working-directory: ${{ matrix.module }}
