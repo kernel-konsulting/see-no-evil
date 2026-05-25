@@ -64,3 +64,5 @@ PLAN.md
 coverage/
 dist-*/
 secrets/
+test_data/
+tests/proxy-regression/results/
