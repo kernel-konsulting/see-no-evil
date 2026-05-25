@@ -38,6 +38,7 @@ test = [
 
 [project.scripts]
 seenoevil-image-classifier = "seenoevil_image_classifier.__main__:main"
+seenoevil-image-regression = "seenoevil_image_classifier.regression:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
