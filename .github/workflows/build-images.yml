@@ -26,7 +26,7 @@ jobs:
         service: [api, ui, proxy, dns, image-classifier, text-classifier, video-sampler, scanner, updater]
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -51,7 +51,7 @@ jobs:
     name: docker compose config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
       - name: docker compose config
         working-directory: deploy/compose
         env:
