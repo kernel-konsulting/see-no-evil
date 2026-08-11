@@ -1032,13 +1032,14 @@ func findISOBMFFDimensions(raw []byte, depth int) (int, int, bool) {
 		size := uint64(binary.BigEndian.Uint32(raw[offset : offset+4]))
 		boxType := string(raw[offset+4 : offset+8])
 		headerSize := uint64(8)
-		if size == 1 {
+		switch size {
+		case 1:
 			if offset+16 > len(raw) {
 				return 0, 0, false
 			}
 			size = binary.BigEndian.Uint64(raw[offset+8 : offset+16])
 			headerSize = 16
-		} else if size == 0 {
+		case 0:
 			size = uint64(len(raw) - offset)
 		}
 		if size < headerSize || uint64(offset)+size > uint64(len(raw)) {
