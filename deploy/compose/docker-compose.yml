@@ -94,6 +94,10 @@ services:
       - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
     environment:
       SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+      # Shared secrets for in-pod callers (proxy → decide/runtime/heartbeat,
+      # scanner → devices/discover). Must match the proxy/scanner containers.
+      SEENOEVIL_PROXY_TOKEN: "${SEENOEVIL_PROXY_TOKEN:-}"
+      SCANNER_API_TOKEN: "${SCANNER_API_TOKEN:-}"
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
@@ -191,6 +195,8 @@ services:
       - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
     environment:
       CONFIG_PATH: /etc/seenoevil/config.yaml
+      # Must match the api container's SEENOEVIL_PROXY_TOKEN.
+      SEENOEVIL_PROXY_TOKEN: "${SEENOEVIL_PROXY_TOKEN:-}"
     depends_on:
       api:
         condition: service_healthy
@@ -432,7 +438,10 @@ services:
     restart: unless-stopped
     networks: [internal, edge]
     ports:
-      - "3000:3000"
+      # Localhost-only by default: Grafana ships with admin/changeme until
+      # GRAFANA_ADMIN_PASSWORD is set, so do not expose it on the LAN.
+      # Override with e.g. SNE_GRAFANA_BIND=0.0.0.0 once a real password is set.
+      - "${SNE_GRAFANA_BIND:-127.0.0.1}:${SNE_GRAFANA_PORT:-3000}:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-changeme}"
       GF_AUTH_ANONYMOUS_ENABLED: "false"

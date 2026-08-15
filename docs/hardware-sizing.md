@@ -87,8 +87,11 @@ everything you need to size for your workload:
    - Proxy p95 latency — under 1 s for browsing to feel snappy.
 4. Open the **host & runtime** dashboard:
    - Per-container CPU should stay under 70 % of one core sustained.
-   - RSS for the image classifier is the largest single number; if it
-     exceeds half your RAM, switch to the smaller `falconsai` model.
+   - RSS for the image classifier is the largest single number; the ONNX
+     model is ~340 MB in RAM on top of the runtime. If memory is tight,
+     prefer a machine with more RAM or run with the model on a swap-backed
+     volume rather than the (removed) `falconsai` variant, which shipped no
+     ONNX export.
 
 Alert rules in `services/observability/alerts.yml` will fire if proxy
 latency or classifier errors blow past sensible defaults — adjust the
@@ -98,7 +101,7 @@ thresholds to match your hardware once you have a baseline.
 
 | Host | Image model | `device` | Video sample rate | DB |
 |---|---|---|---|---|
-| Pi 4 | `falconsai` | `cpu` | 4 frames | SQLite |
+| Pi 4 | `freepik` | `cpu` | 4 frames | SQLite |
 | Pi 5 / N100 | `freepik` | `cpu` | 8 frames | SQLite |
 | Mini-PC + iGPU | `freepik` | `openvino` | 8 frames | SQLite |
 | Workstation + NVIDIA | `freepik` | `cuda` | 16 frames | SQLite or Postgres |

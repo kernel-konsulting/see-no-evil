@@ -8,12 +8,13 @@ sampling to filter NSFW (and other configured) content on a network you control.
 ships as a set of containers you can run on Podman, Docker Compose, or Kubernetes —
 on a Raspberry Pi 5, an old NUC, dedicated hardware, or a self-managed cloud VM.
 
-**Status:** v0.1 release candidate. Every milestone (M0–M9) is implemented:
+**Status:** v0.1 release candidate. All planned milestones are implemented —
 DNS + MITM proxy + image/text/video classifiers, control-plane API + admin
-UI, install wizard, scanner, OIDC, backup/restore, Litestream, full
+UI, install wizard, scanner, OIDC, backup/restore, Litestream, and full
 observability with Grafana dashboards and vmalert. The pod is ready for
-home and small-org pilot deployments. See [PLAN.md](PLAN.md) for the per-
-milestone status table.
+home and small-org pilot deployments. See [PLAN.md](PLAN.md) for the
+per-milestone status table and the few tracked open items (OPA wiring,
+opt-in backup/litestream profiles).
 
 ---
 
