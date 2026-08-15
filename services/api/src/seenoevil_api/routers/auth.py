@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import oidc
 from ..auth import (
+    _login_limiter,
+    _setup_limiter,
     admin_is_configured,
+    check_rate_limit,
     clear_session,
     issue_session,
     set_admin_password,
@@ -33,7 +36,14 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
     r = APIRouter(prefix="/v1/auth", tags=["auth"])
 
     @r.post("/setup", response_model=LoginResponse)
-    def setup(body: SetupRequest, session: Session = Depends(get_session_dep)) -> LoginResponse:
+    def setup(
+        body: SetupRequest,
+        request: Request,
+        session: Session = Depends(get_session_dep),
+    ) -> LoginResponse:
+        # Rate-limit setup so a LAN attacker racing to claim the first admin
+        # account cannot brute-force the wizard.
+        check_rate_limit(_setup_limiter, request)
         # Setup is only callable while no admin exists. After that, password
         # changes go through an authenticated endpoint (added in M1.5).
         if admin_is_configured(session):
@@ -48,9 +58,11 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
     @r.post("/login", response_model=LoginResponse)
     def login(
         body: LoginRequest,
+        request: Request,
         response: Response,
         session: Session = Depends(get_session_dep),
     ) -> LoginResponse:
+        check_rate_limit(_login_limiter, request)
         if not verify_admin(session, body.email, body.password):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
         issue_session(session, response, body.email)

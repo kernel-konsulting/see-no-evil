@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..auth import require_admin_or_scanner_factory
 from ..config import AppConfig
 from ..models import Device, Profile
 from ..schemas import (
@@ -23,6 +24,7 @@ from ..schemas import (
 
 def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/devices", tags=["devices"])
+    require_admin_or_scanner = require_admin_or_scanner_factory(get_session_dep, get_config)
 
     @r.get("", response_model=list[DeviceOut], dependencies=[Depends(require_admin)])
     def list_devices(session: Session = Depends(get_session_dep)) -> list[Device]:
@@ -92,7 +94,7 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     @r.post(
         "/discover",
         response_model=DiscoverResponse,
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_admin_or_scanner)],
     )
     def discover_devices(
         body: DiscoverRequest,

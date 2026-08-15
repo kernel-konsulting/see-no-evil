@@ -9,17 +9,22 @@ declared in the schema but not yet consumed.
 
 from __future__ import annotations
 
+import hmac
+import os
 import secrets
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from fastapi import Cookie, Depends, HTTPException, Response, status
+from fastapi import Cookie, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .config import AppConfig
 from .models import Setting, User
 
 SESSION_COOKIE = "seenoevil_session"
@@ -282,5 +287,141 @@ def require_user_factory(get_session_dep):
 
     def _dep(current: tuple[str, str] = Depends(inner)) -> tuple[str, str]:
         return current
+
+    return _dep
+
+
+# ---------------------------------------------------------------------------
+# In-memory rate limiting (login / setup brute-force protection)
+# ---------------------------------------------------------------------------
+
+
+class _RateLimiter:
+    """Sliding-window rate limiter keyed by arbitrary strings (e.g. client IP).
+
+    In-memory only: fine for a single-API-process pod; each process keeps its
+    own window, which is acceptable for LAN-scale deployments.
+    """
+
+    def __init__(self, limit: int, window_seconds: float) -> None:
+        self.limit = limit
+        self.window = window_seconds
+        self._hits: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, []) if now - t < self.window]
+            if len(hits) >= self.limit:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            return True
+
+    def clear(self) -> None:
+        with self._lock:
+            self._hits.clear()
+
+
+# 10 login attempts / 5 min per source IP; 5 setup attempts / 5 min.
+_login_limiter = _RateLimiter(limit=10, window_seconds=300)
+_setup_limiter = _RateLimiter(limit=5, window_seconds=300)
+
+
+def clear_rate_limiters() -> None:
+    """Reset all limiter state (used by tests between cases)."""
+    _login_limiter.clear()
+    _setup_limiter.clear()
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def check_rate_limit(limiter: _RateLimiter, request: Request) -> None:
+    if not limiter.allow(client_ip(request)):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too many attempts, try again later",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Internal service authentication (proxy / scanner bearer tokens)
+# ---------------------------------------------------------------------------
+
+
+def _bearer_token(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer ") :].strip()
+    return ""
+
+
+def _token_matches(provided: str | None, expected: str | None) -> bool:
+    return bool(provided and expected and hmac.compare_digest(provided, expected))
+
+
+def require_proxy_factory(get_config):
+    """Dependency: only the in-pod proxy may call this endpoint.
+
+    Authenticates `Authorization: Bearer <token>` against
+    ``proxy.api_token`` (or the SEENOEVIL_PROXY_TOKEN env var). Fails closed:
+    if no token is configured at all, the endpoint refuses to serve rather
+    than silently accepting unauthenticated LAN traffic.
+    """
+
+    def _dep(
+        request: Request,
+        config: AppConfig = Depends(get_config),
+    ) -> str:
+        expected = config.proxy.api_token or os.environ.get("SEENOEVIL_PROXY_TOKEN")
+        if not expected:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "proxy token not configured",
+            )
+        if not _token_matches(_bearer_token(request), expected):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid proxy token")
+        return "proxy"
+
+    return _dep
+
+
+def require_admin_or_scanner_factory(get_session_dep, get_config):
+    """Dependency: a valid admin session cookie, or the scanner's bearer token.
+
+    Used by /v1/devices/discover so the scanner can report findings without a
+    browser session while LAN clients still cannot.
+    """
+
+    def _dep(
+        request: Request,
+        session: Session = Depends(get_session_dep),
+        token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+        config: AppConfig = Depends(get_config),
+    ) -> str:
+        if token:
+            try:
+                payload = _decode(session, token)
+                sub = payload.get("sub")
+                if not sub:
+                    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
+                user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
+                if user is not None and user.role != ROLE_ADMIN:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
+                return str(sub)
+            except HTTPException:
+                # Fall through to the scanner token below only when the cookie
+                # itself was invalid; a valid viewer cookie already returned 403.
+                pass
+        expected = config.scanner.api_token or os.environ.get("SCANNER_API_TOKEN")
+        if not _token_matches(_bearer_token(request), expected):
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "admin session or scanner token required"
+            )
+        return "scanner"
 
     return _dep

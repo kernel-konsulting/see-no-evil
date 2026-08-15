@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from .. import audit_sig
 from ..models import AuditDecision
 from ..schemas import AuditOut
 
@@ -25,7 +26,7 @@ def make_router(get_session_dep, require_user) -> APIRouter:
         # to fetch the next chunk. ``limit`` is the page size.
         before_id: int | None = Query(default=None, ge=1),
         limit: int = Query(default=100, ge=1, le=1000),
-    ) -> list[AuditDecision]:
+    ) -> list[AuditOut]:
         stmt = select(AuditDecision).order_by(AuditDecision.id.desc())
         if device_id is not None:
             stmt = stmt.where(AuditDecision.device_id == device_id)
@@ -35,7 +36,22 @@ def make_router(get_session_dep, require_user) -> APIRouter:
             stmt = stmt.where(AuditDecision.ts >= since)
         if before_id is not None:
             stmt = stmt.where(AuditDecision.id < before_id)
-        return list(session.scalars(stmt.limit(limit)))
+        rows = list(session.scalars(stmt.limit(limit)))
+        if not rows:
+            return []
+        secret = audit_sig.ensure_secret(session)
+        return [
+            AuditOut.model_validate(row).model_copy(
+                update={
+                    "signature_valid": (
+                        None
+                        if row.signature is None  # legacy pre-signature row
+                        else audit_sig.verify_row(secret, row)
+                    )
+                }
+            )
+            for row in rows
+        ]
 
     @r.delete(
         "",

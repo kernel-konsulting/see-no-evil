@@ -9,7 +9,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import notifications, panic, runtime
+from .. import audit_sig, notifications, panic, runtime
+from ..auth import require_proxy_factory
 from ..config import AppConfig
 from ..models import AuditDecision, Device, Profile, QuarantineItem, Quota
 from ..policy import DecisionInput, DecisionOutput, GlobalRules, ProfileView, decide, now_parts
@@ -37,10 +38,13 @@ def _resolve_device(session: Session, body: DecideRequest) -> tuple[Device | Non
     device: Device | None = None
     if body.device_id is not None:
         device = session.get(Device, body.device_id)
-    elif body.device_mac:
-        device = session.scalars(select(Device).where(Device.mac == body.device_mac)).first()
-    if device is None and body.client_ip:
+    elif body.client_ip:
+        # Preferred path: the proxy attributes by source IP (client MACs are
+        # invisible at the TCP layer, and client-supplied MACs are untrusted).
         device = session.scalars(select(Device).where(Device.ip == body.client_ip)).first()
+    elif body.device_mac:
+        # Kept for compatibility; the proxy no longer sends client-supplied MACs.
+        device = session.scalars(select(Device).where(Device.mac == body.device_mac)).first()
     profile = device.profile if device else None
     return device, profile
 
@@ -158,6 +162,7 @@ def _global_rules(session: Session) -> GlobalRules:
 
 def make_router(get_session_dep, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1", tags=["decide"])
+    require_proxy = require_proxy_factory(get_config)
 
     @r.post("/decide", response_model=DecideResponse)
     def post_decide(
@@ -165,6 +170,7 @@ def make_router(get_session_dep, get_config) -> APIRouter:
         background: BackgroundTasks,
         session: Session = Depends(get_session_dep),
         config: AppConfig = Depends(get_config),
+        _proxy: str = Depends(require_proxy),
     ) -> DecideResponse:
         device, profile = _resolve_device(session, body)
         if profile is None:
@@ -211,18 +217,20 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                 global_rules=_global_rules(session),
             )
 
-        session.add(
-            AuditDecision(
-                device_id=device.id if device else None,
-                profile_id=profile.id,
-                url=body.url,
-                content_type=body.content_type,
-                decision=decision.decision,
-                reason=decision.reason,
-                classifier_scores=dict(body.classifier_scores),
-                thumbnail_b64=body.thumbnail_b64,
-            )
+        audit_row = AuditDecision(
+            device_id=device.id if device else None,
+            profile_id=profile.id,
+            url=body.url,
+            content_type=body.content_type,
+            decision=decision.decision,
+            reason=decision.reason,
+            classifier_scores=dict(body.classifier_scores),
+            thumbnail_b64=body.thumbnail_b64,
         )
+        session.add(audit_row)
+        # Flush so id/ts are populated, then sign the row (tamper detection).
+        session.flush()
+        audit_sig.sign_row(session, audit_row)
 
         if decision.decision == "block" and _should_quarantine(decision.reason, body.content_type):
             session.add(

@@ -97,6 +97,9 @@ class AuditDecision(Base):
     reason: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     classifier_scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     thumbnail_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # HMAC-SHA256 over the row's substantive fields (see audit_sig.py).
+    # Null for rows written before the signature migration.
+    signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (Index("ix_audit_device_ts", "device_id", "ts"),)
 
