@@ -63,6 +63,16 @@ type ProxyConfig struct {
 	MaxVideoBody string `yaml:"max_video_body"` // default: 500MiB
 
 	TextInspection TextInspectionConfig `yaml:"text_inspection"`
+
+	// APIToken authenticates proxy→API calls (/v1/decide, /v1/runtime,
+	// /v1/quota/heartbeat). Mirrored from the api service's
+	// SEENOEVIL_PROXY_TOKEN. Empty disables the header (tests, single-host).
+	APIToken string `yaml:"api_token"`
+
+	// FailClosed makes classifier / policy failures block instead of
+	// allowing through. The default (false) is fail-open: an unhealthy
+	// classifier or API degrades filtering but does not break the network.
+	FailClosed bool `yaml:"fail_closed"`
 }
 
 // TextInspectionConfig controls how the proxy reacts when the text classifier
@@ -201,6 +211,9 @@ func (r *Root) setDefaults() {
 	}
 	if r.Proxy.TextInspection.Redaction == "" {
 		r.Proxy.TextInspection.Redaction = envOr("TEXT_REDACTION", "[content removed by see-no-evil]")
+	}
+	if r.Proxy.APIToken == "" {
+		r.Proxy.APIToken = os.Getenv("SEENOEVIL_PROXY_TOKEN")
 	}
 }
 

@@ -14,12 +14,17 @@ import (
 // Client calls the policy API's /v1/decide endpoint.
 type Client struct {
 	baseURL    string
+	token      string
 	httpClient *http.Client
 }
 
-func NewClient(baseURL string) *Client {
+// NewClient returns a Client for baseURL. When token is non-empty every
+// request carries an `Authorization: Bearer <token>` header so the API can
+// distinguish the in-pod proxy from LAN clients.
+func NewClient(baseURL, token string) *Client {
 	return &Client{
 		baseURL: baseURL,
+		token:   token,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -58,6 +63,9 @@ func (c *Client) Decide(ctx context.Context, req DecideRequest) (*DecideResponse
 		return nil, fmt.Errorf("build decide request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

@@ -66,9 +66,15 @@ func main() {
 		FFmpegPath:     envOr("FFMPEG_PATH", "ffmpeg"),
 		ThumbnailWidth: 256,
 		ThumbnailJPEGQ: 60,
+		MaxConcurrent:  envInt("VIDEO_SAMPLER_MAX_CONCURRENT", 2),
 	})
 
-	gs := grpc.NewServer()
+	// Raise the default 4 MiB gRPC message caps: video arrives as 256 KiB
+	// chunks but the per-message ceiling must not be the bottleneck.
+	gs := grpc.NewServer(
+		grpc.MaxRecvMsgSize(16<<20),
+		grpc.MaxSendMsgSize(16<<20),
+	)
 	classifyv1.RegisterVideoSamplerServer(gs, srv)
 	hs := health.NewServer()
 	hs.SetServingStatus("seenoevil.classify.v1.VideoSampler", healthpb.HealthCheckResponse_SERVING)
@@ -114,6 +120,15 @@ func main() {
 func envOr(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return d
+}
+
+func envInt(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return d
 }

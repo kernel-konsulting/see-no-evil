@@ -70,8 +70,8 @@ func TestLeafCacheMintsValidCert(t *testing.T) {
 	pool.AddCert(kp.Cert)
 
 	_, err = leaf.Verify(x509.VerifyOptions{
-		DNSName: "example.com",
-		Roots:   pool,
+		DNSName:   "example.com",
+		Roots:     pool,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	})
 	if err != nil {

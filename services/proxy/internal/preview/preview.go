@@ -25,7 +25,31 @@ const (
 	maxWidth   = 192 // matches the UI quarantine card width
 	jpegQ      = 60
 	blurPasses = 6 // 3x3 box-blur iterations
+
+	// maxPreviewPixels bounds the decoded image size. image.Decode happily
+	// allocates for the full pixel grid before we downscale, so a small
+	// crafted image with huge dimensions ("decompression bomb") could OOM the
+	// proxy. We reject anything larger than 50 MP up front.
+	maxPreviewPixels = 50_000_000
 )
+
+// decodeBounded decodes raw only if its declared dimensions are within the
+// pixel budget. Returns (nil, false) on decode failure or oversized images.
+func decodeBounded(raw []byte) (image.Image, bool) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, false
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 ||
+		int64(cfg.Width)*int64(cfg.Height) > maxPreviewPixels {
+		return nil, false
+	}
+	src, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, false
+	}
+	return src, true
+}
 
 // Image returns a base64-encoded JPEG thumbnail of img, downscaled and
 // box-blurred. Returns ("", false) on any decode/encode failure.
@@ -33,8 +57,8 @@ func Image(raw []byte) (string, bool) {
 	if len(raw) == 0 {
 		return "", false
 	}
-	src, _, err := image.Decode(bytes.NewReader(raw))
-	if err != nil {
+	src, ok := decodeBounded(raw)
+	if !ok {
 		return "", false
 	}
 	thumb := scale(src, maxWidth)
@@ -54,8 +78,8 @@ func Clear(raw []byte) (string, bool) {
 	if len(raw) == 0 {
 		return "", false
 	}
-	src, _, err := image.Decode(bytes.NewReader(raw))
-	if err != nil {
+	src, ok := decodeBounded(raw)
+	if !ok {
 		return "", false
 	}
 	thumb := scale(src, maxWidth)

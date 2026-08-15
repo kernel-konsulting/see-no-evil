@@ -35,6 +35,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/classifier"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/preview"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/quota"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/runtime"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/safesearch"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/textextract"
@@ -81,7 +82,11 @@ type Config struct {
 	Classifiers    *classifier.Clients
 	Runtime        *runtime.Poller
 	Policy         *policy.Client
+	Quota          *quota.Reporter
 	TextInspection TextInspectionCfg
+	// FailClosed blocks when classifiers or the policy API fail, instead of
+	// failing open. Default false (degraded filtering beats a broken network).
+	FailClosed bool
 }
 
 // TextInspectionCfg controls how the text classifier verdict is applied.
@@ -111,6 +116,7 @@ type Handler struct {
 	ssCfg                safesearch.Config
 	blockedYouTubeMu     sync.Mutex
 	blockedYouTubeVideos map[string]blockedYouTubeVideo
+	transport            *http.Transport // shared upstream transport (conn reuse)
 }
 
 type blockedYouTubeVideo struct {
@@ -130,6 +136,19 @@ func NewHandler(cfg Config) *Handler {
 		leafCache:            ca.NewLeafCache(cfg.CA),
 		bypass:               bypass,
 		blockedYouTubeVideos: make(map[string]blockedYouTubeVideo),
+		transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   16,
+		},
 		ssCfg: safesearch.Config{
 			Google:            cfg.SafeSearch.Google,
 			Bing:              cfg.SafeSearch.Bing,
@@ -185,13 +204,15 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tlsConn.Close() }()
 
 	// Re-use the plain HTTP handler on the decrypted connection.
-	httpSrv := &http.Server{ //nolint:gosec // timeouts set per-request
+	httpSrv := &http.Server{ //nolint:gosec // timeouts set below
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, innerR *http.Request) {
 			innerR.URL.Host = host
 			innerR.URL.Scheme = "https"
 			innerR.Host = host
 			h.handlePlainHTTP(w, innerR)
 		}),
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 	_ = httpSrv.Serve(newSingleConnListener(tlsConn))
 }
@@ -210,6 +231,17 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	removeHopHeaders(r.Header)
 	r.Header.Del("Proxy-Connection")
 
+	// Device identity is derived from the source IP only. Client-supplied
+	// identity headers are untrusted: a filtered device could otherwise
+	// claim a different MAC (e.g. a parent's) to inherit its profile, and
+	// the header would leak upstream.
+	r.Header.Del("X-Device-Mac")
+
+	ip := clientIP(r)
+	if h.cfg.Quota != nil {
+		h.cfg.Quota.NoteActivity(ip)
+	}
+
 	// Read the request body for inspection (if applicable). Request bodies
 	// (POSTed forms / uploads) use the text limit since they're typically
 	// form data or JSON.
@@ -226,8 +258,7 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 			"method", r.Method,
 			"host", r.Host,
 			"content_type", r.Header.Get("Accept"),
-			"device_mac", r.Header.Get("X-Device-Mac"),
-			"client_ip", clientIP(r),
+			"client_ip", ip,
 			"reason", reason,
 		)
 		writeBlockPage(w, r.URL.String(), reason)
@@ -265,8 +296,7 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 			"method", r.Method,
 			"host", r.Host,
 			"content_type", respCT,
-			"device_mac", r.Header.Get("X-Device-Mac"),
-			"client_ip", clientIP(r),
+			"client_ip", ip,
 			"reason", reason,
 		)
 		writeBlockedResponse(w, r.URL.String(), reason, respCT, respBodySnap)
@@ -332,6 +362,11 @@ func (h *Handler) decide(
 		if err != nil {
 			slog.Warn("image classifier error", "err", err)
 			classifierErrors.WithLabelValues("image").Inc()
+			if h.cfg.FailClosed {
+				reason := "classifier:image:unavailable"
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+				return "block", reason, nil
+			}
 		} else {
 			for k, v := range result.Scores {
 				scores["image:"+k] = v
@@ -363,13 +398,18 @@ func (h *Handler) decide(
 		if err != nil {
 			slog.Warn("video sampler error", "err", err)
 			classifierErrors.WithLabelValues("video").Inc()
-			reason := "classifier:video:sampler_error"
-			_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
-			return "block", reason, nil
+			if h.cfg.FailClosed {
+				reason := "classifier:video:sampler_error"
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+				return "block", reason, nil
+			}
+			// Fail-open: a sampler outage must not break video streaming.
 		} else if result == nil {
-			reason := "classifier:video:sampler_unavailable"
-			_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
-			return "block", reason, nil
+			if h.cfg.FailClosed {
+				reason := "classifier:video:sampler_unavailable"
+				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+				return "block", reason, nil
+			}
 		} else if result != nil {
 			for k, v := range result.Scores {
 				scores["video:"+k] = v
@@ -383,9 +423,13 @@ func (h *Handler) decide(
 				"bytes", len(respBody),
 			)
 			if isVideoSamplerFailure(result.Reason) {
-				reason := classifierBlockReason("video", result.Reason, result.Scores)
-				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
-				return "block", reason, nil
+				if h.cfg.FailClosed {
+					reason := classifierBlockReason("video", result.Reason, result.Scores)
+					_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+					return "block", reason, nil
+				}
+				// Fail-open: un-inspectable video (DRM, exotic codec, empty
+				// stream) is allowed through rather than breaking streaming.
 			}
 			if result.Action.String() == "ACTION_BLOCK" {
 				// We don't have a frame thumbnail returned by the sampler today;
@@ -402,7 +446,7 @@ func (h *Handler) decide(
 	// segments only — feeding raw HTML/JSON to the classifier produces
 	// constant false positives on markup tokens.
 	if h.textMode() != "off" && rt.Inspect.Text && !skipTextClassification(r) && textextract.IsSupported(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
-		action, reason, segScores, replaced := h.inspectText(ctx, r, ct, respBody, rt.Text.NSFWThreshold)
+		action, reason, segScores, replaced := h.inspectText(ctx, r, ct, respBody, rt.Text.NSFWThreshold, h.cfg.FailClosed)
 		for k, v := range segScores {
 			scores["text:"+k] = v
 		}
@@ -416,10 +460,8 @@ func (h *Handler) decide(
 
 	// Policy API for domain/schedule/quota checks.
 	if h.cfg.Policy != nil {
-		mac := r.Header.Get("X-Device-Mac")
 		result, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
 			URL:              r.URL.String(),
-			DeviceMAC:        mac,
 			ClientIP:         clientIP(r),
 			ContentType:      ct,
 			ClassifierScores: scores,
@@ -427,6 +469,9 @@ func (h *Handler) decide(
 		})
 		if err != nil {
 			slog.Warn("policy API error", "err", err)
+			if h.cfg.FailClosed {
+				return "block", "policy:unavailable", replacementBody
+			}
 			// Fail-open on policy API errors (classifiers already ran).
 			return "allow", "policy_api_error", replacementBody
 		}
@@ -539,6 +584,7 @@ func (h *Handler) inspectText(
 	contentType string,
 	body []byte,
 	runtimeThreshold float32,
+	failClosed bool,
 ) (string, string, map[string]float32, []byte) {
 	segments := textextract.Extract(contentType, body)
 	if len(segments) == 0 {
@@ -556,6 +602,9 @@ func (h *Handler) inspectText(
 		if err != nil {
 			slog.Warn("text classifier error", "err", err, "path", seg.Path)
 			classifierErrors.WithLabelValues("text").Inc()
+			if failClosed {
+				return "block", "classifier:text:unavailable", maxScores, nil
+			}
 			continue
 		}
 		for k, v := range res.Scores {
@@ -598,7 +647,6 @@ func (h *Handler) auditDecide(ctx context.Context, r *http.Request, ct string, s
 	// Best-effort — ignore errors.
 	_, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
 		URL:              r.URL.String(),
-		DeviceMAC:        r.Header.Get("X-Device-Mac"),
 		ClientIP:         clientIP(r),
 		ContentType:      ct,
 		ClassifierScores: scores,
@@ -748,18 +796,12 @@ func bareHost(r *http.Request) string {
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
-// clientIP returns the source IP of the request, preferring the explicit
-// X-Forwarded-For header (some upstream bypass setups inject it) and falling
-// back to RemoteAddr. Returns "" when nothing is available.
+// clientIP returns the source IP of the request from the TCP peer.
+//
+// Deliberately ignores X-Forwarded-For and similar client-supplied headers:
+// trusting them would let a filtered device spoof its identity and inherit
+// another device's (e.g. a parent's) profile.
 func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		if comma := strings.IndexByte(h, ','); comma > 0 {
-			h = h[:comma]
-		}
-		if ip := strings.TrimSpace(h); ip != "" {
-			return ip
-		}
-	}
 	if r.RemoteAddr == "" {
 		return ""
 	}
@@ -818,16 +860,13 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 // ---------------------------------------------------------------------------
 
 func (h *Handler) roundTrip(r *http.Request) (*http.Response, error) {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	}
 	// Strip Proxy-Authorization so it doesn't leak upstream.
 	r.Header.Del("Proxy-Authorization")
 	// Let Go's transport negotiate/decode gzip itself. Forwarding the browser's
 	// br/gzip header gives us compressed HTML/JSON bytes, which breaks text
 	// extraction and gRPC string marshaling.
 	r.Header.Del("Accept-Encoding")
-	return transport.RoundTrip(r)
+	return h.transport.RoundTrip(r)
 }
 
 func (h *Handler) refetchFullVideoIfNeeded(r *http.Request, resp *http.Response) *http.Response {
