@@ -29,10 +29,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.1.0
+        uses: docker/setup-qemu-action@v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.3.0
 
       # M0: build only — do not push. Pushing wires up in M1.
       # Build context is the repo root so Dockerfiles can COPY ../../shared/proto/*.
