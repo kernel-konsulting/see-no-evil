@@ -102,7 +102,7 @@ repos:
   # Protocol Buffers — formatting
   # ---------------------------------------------------------------------------
   - repo: https://github.com/yoheimuta/protolint
-    rev: v0.56.4
+    rev: v0.57.0
     hooks:
       - id: protolint
         files: ^shared/proto/
