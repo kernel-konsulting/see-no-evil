@@ -185,3 +185,45 @@ func TestBlockedYouTubeThumbnailBlocksMatchingPlayback(t *testing.T) {
 		t.Fatalf("thumbnail request should keep flowing through image classifier, got block %q", reason)
 	}
 }
+
+func TestClientIPUsesRemoteAddrOnly(t *testing.T) {
+	// X-Forwarded-For must be ignored: a filtered device could otherwise
+	// spoof another device's IP to inherit its profile.
+	r := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
+	r.RemoteAddr = "10.0.0.7:54321"
+	r.Header.Set("X-Forwarded-For", "192.168.1.99")
+
+	if got := clientIP(r); got != "10.0.0.7" {
+		t.Fatalf("clientIP() = %q, want 10.0.0.7 (X-Forwarded-For ignored)", got)
+	}
+}
+
+func TestClientIPHandlesMissingPort(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
+	r.RemoteAddr = "10.0.0.7"
+	if got := clientIP(r); got != "10.0.0.7" {
+		t.Fatalf("clientIP() = %q, want 10.0.0.7", got)
+	}
+}
+
+func TestHandlePlainHTTPStripsClientIdentityHeaders(t *testing.T) {
+	// The proxy must drop client-supplied X-Device-Mac before forwarding, so
+	// the header can neither leak upstream nor influence attribution.
+	var gotDeviceMac string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDeviceMac = r.Header.Get("X-Device-Mac")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	h := NewHandler(Config{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, upstream.URL+"/", nil)
+	req.RemoteAddr = "10.0.0.7:1234"
+	req.Header.Set("X-Device-Mac", "aa:bb:cc:dd:ee:ff")
+	h.handlePlainHTTP(rec, req)
+
+	if gotDeviceMac != "" {
+		t.Fatalf("upstream received X-Device-Mac = %q, want stripped", gotDeviceMac)
+	}
+}

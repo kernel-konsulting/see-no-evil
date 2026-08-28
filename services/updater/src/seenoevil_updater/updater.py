@@ -8,20 +8,23 @@ Artefact catalogue (shipped in this file as the single source of truth):
 
   IMAGE_CLASSIFIER
     - image_classifier.onnx      (Freepik nsfw_image_detector, ONNX export)
-    - image_classifier_tiny.onnx (Falconsai, smaller, for Pi 4)
 
   TEXT_CLASSIFIER
     - text_classifier.onnx       (michellejieli/NSFW_text_classifier, ONNX export)
     - text_tokenizer.json        (matching HF tokenizer)
 
-Checksums are SHA-256.  The updater refuses to use a file whose checksum does
-not match; it deletes the partial download and exits non-zero.
+Checksums are SHA-256 of the exact bytes served from the pinned URLs (the HF
+LFS object id for LFS files).  The updater refuses to use a file whose
+checksum does not match; it deletes the partial download and exits non-zero.
+Keep checksums in lockstep with the URLs — bumping either without the other
+breaks verification on purpose.
 
 Environment variables
 ---------------------
 MODELS_DIR     Where to write model files (default /data/models).
 LISTS_DIR      Where to write blocklists (default /data/lists).
-MODEL_VARIANT  freepik (default) | falconsai
+MODEL_VARIANT  Only "freepik" is supported (the old falconsai alias was
+               removed — Falconsai publishes no ONNX export).
 SKIP_MODELS    1 to skip model download (useful when weights are pre-mounted).
 SKIP_LISTS     1 to skip blocklist download.
 HTTP_TIMEOUT   Seconds for HTTP requests (default 120).
@@ -62,21 +65,15 @@ class Artefact:
 
 
 # Hosted on Hugging Face Hub model repos.  We pull the ONNX export directly.
-# These checksums must be updated whenever upstream releases a new model version.
+# Checksums are the HF LFS object ids (= SHA-256 of the served bytes) and
+# MUST be updated in lockstep with the URLs whenever a model is bumped.
 _MODEL_ARTEFACTS: dict[str, list[Artefact]] = {
     "freepik": [
         Artefact(
             dest="image_classifier.onnx",
             # ONNX export of nsfw-image-detector hosted on HF ONNX community.
             url="https://huggingface.co/onnx-community/nsfw-image-detector-ONNX/resolve/main/onnx/model.onnx",
-            sha256="PLACEHOLDER_FREEPIK_SHA256",  # updated at release
-        ),
-    ],
-    "falconsai": [
-        Artefact(
-            dest="image_classifier.onnx",
-            url="https://huggingface.co/onnx-community/nsfw-image-detector-ONNX/resolve/main/onnx/model.onnx",
-            sha256="PLACEHOLDER_FALCONSAI_SHA256",
+            sha256="2605f68c77b9262e51afa0ff022971c7a8dabcfa51f55c78321b711b889b0e93",
         ),
     ],
 }
@@ -85,12 +82,12 @@ _TEXT_ARTEFACTS: list[Artefact] = [
     Artefact(
         dest="text_classifier.onnx",
         url="https://huggingface.co/TrumpMcDonaldz/michellejieli-NSFW_text_classifier-ONNX/resolve/main/onnx/decoder_model_merged.onnx",
-        sha256="PLACEHOLDER_TEXT_ONNX_SHA256",
+        sha256="e4d5058467a44b31004f29d18b820d955020704d2539abbcfde93beb71d8882d",
     ),
     Artefact(
         dest="text_tokenizer.json",
         url="https://huggingface.co/TrumpMcDonaldz/michellejieli-NSFW_text_classifier-ONNX/resolve/main/tokenizer.json",
-        sha256="PLACEHOLDER_TEXT_TOKENIZER_SHA256",
+        sha256="91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
     ),
 ]
 

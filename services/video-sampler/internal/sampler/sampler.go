@@ -17,6 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -75,12 +78,17 @@ type Config struct {
 	// ThumbnailJPEGQ sets the JPEG quality of the thumbnail (1..31, lower is
 	// higher quality with libjpeg's qscale).
 	ThumbnailJPEGQ int
+	// MaxConcurrent bounds how many Sample streams run at once. ffmpeg is
+	// CPU/disk hungry and each stream buffers up to MaxVideoBytes on disk, so
+	// unbounded concurrency is a DoS vector. 0 → default 2.
+	MaxConcurrent int
 }
 
 // Server implements VideoSamplerServer.
 type Server struct {
 	classifyv1.UnimplementedVideoSamplerServer
 	cfg Config
+	sem chan struct{}
 }
 
 func NewServer(cfg Config) *Server {
@@ -102,12 +110,25 @@ func NewServer(cfg Config) *Server {
 	if cfg.ThumbnailJPEGQ <= 0 {
 		cfg.ThumbnailJPEGQ = 60
 	}
-	return &Server{cfg: cfg}
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = 2
+	}
+	return &Server{cfg: cfg, sem: make(chan struct{}, cfg.MaxConcurrent)}
 }
 
 // Sample implements the streaming RPC.
 func (s *Server) Sample(stream classifyv1.VideoSampler_SampleServer) error {
 	t0 := time.Now()
+
+	// Admission control: refuse (rather than queue) when the sampler is at
+	// capacity. The proxy treats this as a sampler failure and, by default,
+	// fails open — a busy sampler must not stall video streaming.
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	default:
+		return status.Error(codes.ResourceExhausted, "video_sampler:busy")
+	}
 
 	tmpDir, err := os.MkdirTemp("", "vsampler-")
 	if err != nil {

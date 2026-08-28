@@ -202,7 +202,14 @@ def serve() -> None:
     start_http_server(METRICS_PORT)
     log.info("prometheus metrics on :%d", METRICS_PORT)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=WORKERS))
+    # Raise the default 4 MiB message caps (parity with the proxy's client).
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=WORKERS),
+        options=[
+            ("grpc.max_receive_message_length", 64 << 20),
+            ("grpc.max_send_message_length", 64 << 20),
+        ],
+    )
     classify_pb2_grpc.add_TextClassifierServicer_to_server(
         TextClassifierServicer(session, tokenizer), server
     )

@@ -63,17 +63,17 @@ Two TLS worlds — **never confuse them**:
 
 | Directory | Language | Status |
 |---|---|---|
-| `services/api/` | Python FastAPI | ✅ M1.1 |
+| `services/api/` | Python FastAPI | ✅ M1.1/M8 |
 | `services/proxy/` | Go | ✅ M1.3 |
 | `services/image-classifier/` | Python + ONNX | ✅ M1.2 |
 | `services/text-classifier/` | Python + ONNX | ✅ M1.2 |
 | `services/updater/` | Python | ✅ M1.2 |
-| `services/dns/` | Blocky config | M1.4 |
-| `services/ui/` | React + Vite + TS | M1.4 |
-| `services/video-sampler/` | Go + ffmpeg | M5 |
-| `services/scanner/` | Python + nmap | M1.6/M7 |
-| `services/notifier/` | Python | M6 |
-| `services/cert-helper/` | Python | M1.5 |
+| `services/dns/` | Blocky config | ✅ M1.4 |
+| `services/ui/` | React + Vite + TS | ✅ M1.4 |
+| `services/video-sampler/` | Go + ffmpeg | ✅ M5 |
+| `services/scanner/` | Python + nmap | ✅ M1.6/M7 |
+| `services/notifier/` | Python | ✅ M6 (via api) |
+| `services/cert-helper/` | Python | ✅ M1.5 (api ca router) |
 | `shared/proto/` | Protobuf | ✅ M1.2 |
 
 ---
@@ -133,8 +133,6 @@ Key env vars:
 
 | ID | Scope |
 |---|---|
-| M1.4 | DNS/Blocky real config + UI shell + Caddy Caddyfile |
-| M1.5 | First-run install wizard + compose healthcheck wiring |
-| M1.6 | Scanner + observability + docs polish |
-| M2 | OPA integration, URL/keyword filter, SafeSearch polish, YT channel allow/deny |
-| M3–M9 | See PLAN.md |
+| M2 | OPA wiring — `policies/seenoevil.rego` is CI-tested but `/v1/decide` runs the Python engine; wire OPA in or remove the rego |
+| M9 | Opt-in `backup` / `litestream` compose profiles ship commented; validate before enabling |
+| — | `vpn-wg` (wg-easy) profile: decide and document (Tailscale ships enabled) |

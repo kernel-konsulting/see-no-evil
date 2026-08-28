@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from conftest import PROXY_TOKEN, AuthedClient
 from fastapi.testclient import TestClient
 from seenoevil_api.app import create_app
 from seenoevil_api.config import (
@@ -15,6 +16,7 @@ from seenoevil_api.config import (
     DevicesConfig,
     NotificationsConfig,
     ProfileConfig,
+    ProxyAPIConfig,
 )
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,7 @@ def test_quota_heartbeat_increments_and_blocks(admin_client: TestClient) -> None
 def notify_config(tmp_db_url: str) -> AppConfig:
     return AppConfig(
         db=DBConfig(url=tmp_db_url),
+        proxy=ProxyAPIConfig(api_token=PROXY_TOKEN),
         profiles=[
             ProfileConfig(
                 name="kids",
@@ -169,7 +172,7 @@ def notify_config(tmp_db_url: str) -> AppConfig:
 @pytest.fixture
 def notify_client(notify_config: AppConfig) -> Iterator[TestClient]:
     app = create_app(notify_config)
-    with TestClient(app) as c:
+    with AuthedClient(app) as c:
         c.post("/v1/auth/setup", json={"email": "admin@example.local", "password": "hunter22!"})
         c.post("/v1/auth/login", json={"email": "admin@example.local", "password": "hunter22!"})
         yield c

@@ -51,17 +51,21 @@ func defaults() *Settings {
 type Poller struct {
 	apiBase  string
 	interval time.Duration
+	token    string
 	current  atomic.Pointer[Settings]
 	client   *http.Client
 }
 
-func NewPoller(apiBase string, interval time.Duration) *Poller {
+// NewPoller polls apiBase every interval. token, when non-empty, is sent as
+// an `Authorization: Bearer <token>` header on every fetch.
+func NewPoller(apiBase string, interval time.Duration, token string) *Poller {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	p := &Poller{
 		apiBase:  apiBase,
 		interval: interval,
+		token:    token,
 		client:   &http.Client{Timeout: 5 * time.Second},
 	}
 	p.current.Store(defaults())
@@ -80,6 +84,9 @@ func (p *Poller) fetch(ctx context.Context) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/v1/runtime", nil)
 	if err != nil {
 		return
+	}
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {

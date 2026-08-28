@@ -57,7 +57,25 @@ ${SNE_HOSTNAME}, localhost, 127.0.0.1 {
         respond "ok" 200
     }
 
-    # API — everything under /v1 → FastAPI
+    # Internal-only API routes: the proxy, scanner and vmalert talk to these
+    # over the pod's internal network (with bearer tokens). They must NOT be
+    # reachable from the LAN through Caddy, so block them at the edge —
+    # defense in depth on top of the API-side token checks.
+    handle_path /v1/decide* {
+        respond "not found" 404
+    }
+    handle_path /v1/runtime* {
+        respond "not found" 404
+    }
+    handle_path /v1/quota/* {
+        respond "not found" 404
+    }
+    handle_path /v1/alerts/* {
+        respond "not found" 404
+    }
+
+    # API — everything else under /v1 → FastAPI (admin routes are
+    # cookie-protected; /v1/ca/* and /v1/auth/* are intentionally public).
     handle /v1/* {
         reverse_proxy ${SNE_API_UPSTREAM}
     }

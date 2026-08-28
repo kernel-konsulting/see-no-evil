@@ -31,6 +31,7 @@ import (
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/config"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/mitm"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/policy"
+	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/quota"
 	"github.com/kernel-konsulting/see-no-evil/services/proxy/internal/runtime"
 )
 
@@ -82,11 +83,16 @@ func main() {
 	}
 	defer classifierClients.Close()
 
-	// Policy API client (HTTP, talks to the api service).
-	policyClient := policy.NewClient(cfg.PolicyAPIURL())
+	// Policy API client (HTTP, talks to the api service). Authenticated with
+	// the shared proxy token so the API can tell the in-pod proxy apart from
+	// LAN clients.
+	policyClient := policy.NewClient(cfg.PolicyAPIURL(), cfg.Proxy.APIToken)
 
 	// Runtime settings poller.
-	runtimePoller := runtime.NewPoller(cfg.PolicyAPIURL(), 30*time.Second)
+	runtimePoller := runtime.NewPoller(cfg.PolicyAPIURL(), 30*time.Second, cfg.Proxy.APIToken)
+
+	// Quota activity reporter (per-IP active minutes → /v1/quota/heartbeat).
+	quotaReporter := quota.NewReporter(cfg.PolicyAPIURL(), cfg.Proxy.APIToken)
 
 	// Build the MITM proxy handler.
 	handler := mitm.NewHandler(mitm.Config{
@@ -105,11 +111,13 @@ func main() {
 		Classifiers:     classifierClients,
 		Policy:          policyClient,
 		Runtime:         runtimePoller,
+		Quota:           quotaReporter,
 		TextInspection: mitm.TextInspectionCfg{
 			Mode:          cfg.Proxy.TextInspection.Mode,
 			NSFWThreshold: cfg.Proxy.TextInspection.NSFWThreshold,
 			Redaction:     cfg.Proxy.TextInspection.Redaction,
 		},
+		FailClosed: cfg.Proxy.FailClosed,
 	})
 
 	// HTTP proxy listener.
@@ -138,6 +146,7 @@ func main() {
 	defer stop()
 
 	go runtimePoller.Run(ctx)
+	go quotaReporter.Run(ctx, 60*time.Second)
 
 	go func() {
 		slog.Info("proxy listening", "addr", proxySrv.Addr)

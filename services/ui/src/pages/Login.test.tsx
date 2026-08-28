@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Toaster } from "@/components/ui/toaster";
@@ -18,6 +18,14 @@ function renderLogin() {
     </MemoryRouter>,
   );
 }
+
+beforeEach(() => {
+  // Login and AuthProvider call these on mount; the auto-mock returns
+  // undefined unless stubbed, which crashes the effects with
+  // "Cannot read properties of undefined (reading 'then')".
+  vi.mocked(api.getOidcInfo).mockResolvedValue({ enabled: false, label: "" });
+  vi.mocked(api.getMe).mockResolvedValue({ email: "admin@example.local", role: "admin" });
+});
 
 describe("Login page", () => {
   it("renders username and password fields", () => {

@@ -17,9 +17,8 @@ Implemented today:
 ## Models
 
 - `freepik` — [Freepik/nsfw_image_detector](https://huggingface.co/Freepik/nsfw_image_detector)
-  multi-class (porn / hentai / sexy / drawing / neutral). Default.
-- `falconsai` — [Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection)
-  binary, smaller / faster.
+  multi-class (porn / hentai / sexy / drawing / neutral). Default. The only
+  supported variant (Falconsai publishes no ONNX export).
 
 Weights are pulled by the `updater` container on first start, verified against
 checksums shipped in `MODELS.md`, and cached to `${pod.data_dir}/models/image/`.
