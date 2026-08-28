@@ -50,7 +50,7 @@ secrets/
 *.pem
 
 # Internal working docs
-PLAN.md
+# PLAN.md is tracked on purpose: README/AGENTS.md reference it publicly.
 *.key
 *.pem
 *.crt

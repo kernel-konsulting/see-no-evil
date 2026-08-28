@@ -184,6 +184,15 @@ class DevicesConfig(_Base):
         return [] if v is None else v
 
 
+class ProxyAPIConfig(_Base):
+    """API-side view of the proxy's slice of config.yaml."""
+
+    # Shared secret the in-pod proxy presents as `Authorization: Bearer
+    # <token>` on /v1/decide, /v1/runtime and /v1/quota/heartbeat. Falls
+    # back to the SEENOEVIL_PROXY_TOKEN env var.
+    api_token: str | None = None
+
+
 class AuthBuiltinConfig(_Base):
     admin_email: str = "admin@example.local"
 
@@ -237,6 +246,9 @@ class ScannerConfig(_Base):
     enabled: bool = False
     cidr: str = "192.168.1.0/24"
     interval: str = "1h"
+    # Shared secret the scanner presents as `Authorization: Bearer <token>`
+    # on /v1/devices/discover. Falls back to the SCANNER_API_TOKEN env var.
+    api_token: str | None = None
 
 
 class NotificationsConfig(_Base):
@@ -283,6 +295,7 @@ class AppConfig(_Base):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     classifiers: ClassifiersConfig = Field(default_factory=ClassifiersConfig)
+    proxy: ProxyAPIConfig = Field(default_factory=ProxyAPIConfig)
     profiles: list[ProfileConfig] = Field(default_factory=list)
     devices: DevicesConfig = Field(default_factory=DevicesConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

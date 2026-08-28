@@ -9,6 +9,7 @@ The lifespan does three things in order:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -24,6 +25,7 @@ from .auth import (
     require_user_factory,
     set_admin_password,
 )
+from .cleanup import cleanup_loop
 from .config import AppConfig, ProfileConfig, load_config
 from .db import build_engine, get_db, make_session_factory
 from .migrations import upgrade_to_head
@@ -126,8 +128,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         with session_factory() as session:
             seed_profiles(session, config)
             maybe_seed_admin(session, config)
-        yield
-        engine.dispose()
+
+        # Background retention cleanup (audit log / resolved quarantine).
+        stop = asyncio.Event()
+        cleanup_task = asyncio.create_task(
+            cleanup_loop(
+                session_factory,
+                config.observability.audit.retention_days,
+                stop,
+            )
+        )
+        try:
+            yield
+        finally:
+            stop.set()
+            cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
+            engine.dispose()
 
     app = FastAPI(
         title="see-no-evil API",
@@ -151,11 +169,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(devices.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(audit.make_router(db_dep, require_user))
     app.include_router(quarantine.make_router(db_dep, require_admin, require_user, current_user))
-    app.include_router(quota.make_router(db_dep, require_admin))
+    app.include_router(quota.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(panic.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(decide.make_router(db_dep, get_config_dep))
     app.include_router(alerts.make_router(get_config_dep))
-    app.include_router(settings_router.make_router(db_dep, require_admin))
+    app.include_router(settings_router.make_router(db_dep, require_admin, get_config_dep))
     app.include_router(users_router.make_router(db_dep, require_admin))
     app.include_router(ca.make_router())
     app.include_router(scanner.make_router(require_admin))

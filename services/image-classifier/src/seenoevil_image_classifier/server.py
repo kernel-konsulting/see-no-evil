@@ -111,6 +111,12 @@ def _load_session(model_path: Path, device: str):
 _INPUT_SIZE = (224, 224)
 _MAX_SVG_BYTES = 1_000_000
 
+# Reject images whose declared dimensions exceed this pixel budget *before*
+# decoding. Pillow happily allocates the full grid, so a small crafted image
+# with huge dimensions ("decompression bomb") could OOM the container.
+_MAX_IMAGE_PIXELS = 50_000_000
+Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS  # make Pillow raise, not warn
+
 
 def _looks_like_svg(image_bytes: bytes) -> bool:
     head = image_bytes[:512].lstrip()
@@ -148,7 +154,16 @@ def _preprocess(image_bytes: bytes) -> np.ndarray:
     if _looks_like_svg(image_bytes):
         image_bytes = _rasterize_svg(image_bytes)
 
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+    except Image.DecompressionBombError as exc:
+        # Pillow's own bomb guard fired (dimensions > 2x MAX_IMAGE_PIXELS).
+        raise ValueError(f"image too large (decompression bomb): {exc}") from exc
+    # Decompression-bomb guard: check dimensions before any pixel work.
+    w, h = img.size
+    if w <= 0 or h <= 0 or int(w) * int(h) > _MAX_IMAGE_PIXELS:
+        raise ValueError(f"image too large: {w}x{h} exceeds {_MAX_IMAGE_PIXELS} pixels")
+    img = img.convert("RGB")
     img = img.resize(_INPUT_SIZE, Image.BILINEAR)
     arr = np.array(img, dtype=np.float32) / 255.0  # HWC [0,1]
     arr = arr.transpose(2, 0, 1)  # CHW
@@ -274,7 +289,16 @@ def serve() -> None:
     start_http_server(METRICS_PORT)
     log.info("prometheus metrics on :%d", METRICS_PORT)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=WORKERS))
+    # Raise the default 4 MiB message caps so images up to the proxy's byte
+    # cap reach us; otherwise large images fail with ResourceExhausted and
+    # the proxy silently allows them unclassified.
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=WORKERS),
+        options=[
+            ("grpc.max_receive_message_length", 64 << 20),
+            ("grpc.max_send_message_length", 64 << 20),
+        ],
+    )
 
     classify_pb2_grpc.add_ImageClassifierServicer_to_server(
         ImageClassifierServicer(session), server

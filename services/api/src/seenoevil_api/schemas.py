@@ -122,6 +122,9 @@ class AuditOut(BaseModel):
     reason: str
     classifier_scores: dict[str, Any]
     thumbnail_b64: str | None = None
+    # True when the row's HMAC signature verifies (None for legacy unsigned
+    # rows). Lets admins spot a tampered audit log.
+    signature_valid: bool | None = None
 
 
 class DecideRequest(BaseModel):
@@ -197,6 +200,9 @@ class QuotaHeartbeat(BaseModel):
 
     device_mac: str | None = None
     device_id: int | None = None
+    # Source IP as seen by the proxy. The API resolves the device by IP when
+    # no MAC/id is supplied (the proxy cannot see client MACs).
+    client_ip: str | None = None
     minutes: int = Field(ge=0, le=24 * 60)
 
     @field_validator("device_mac")

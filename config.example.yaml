@@ -91,9 +91,13 @@ proxy:
   https: 0.0.0.0:8443
 
   ca:
-    # auto: generate a CA on first start; private key is encrypted with `age`
-    #       using a passphrase prompted at install. Cert is exported to
-    #       `${pod.data_dir}/ca/seenoevil-ca.crt` for distribution to devices.
+    # auto: generate a CA on first start. When the PROXY_CA_PASSPHRASE env
+    #       var is set, the private key is encrypted at rest with AES-256-GCM
+    #       (PBKDF2-HMAC-SHA256 key derivation) and written to
+    #       `${pod.data_dir}/ca/ca.key.enc`. Without a passphrase the key is
+    #       stored as plaintext ca.key — set the passphrase in production.
+    #       The cert is exported to `${pod.data_dir}/ca/seenoevil-ca.crt`
+    #       for distribution to devices.
     # byo:  use the cert/key paths below. The pod will not generate anything.
     mode: auto
     # cert_path: /data/ca/seenoevil-ca.crt
@@ -119,15 +123,26 @@ proxy:
   # caps below take precedence; this is only used when one of them is unset.
   max_inspect_body: 10MiB
 
-  # Per-content-type buffering caps. Use "unlimited" (or 0) to send the entire
-  # body to the classifier — required for images and most text bodies because
-  # truncating an image past its header makes the decoder reject it outright.
-  # Video has a soft cap because the sampler buffers the whole stream to disk
-  # before extracting frames; the sampler still spreads frames evenly across
-  # whatever was buffered.
-  max_image_body: unlimited
-  max_text_body:  unlimited
+  # Per-content-type buffering caps. Bodies larger than the cap are forwarded
+  # WITHOUT classification (fail-open) — the cap exists to bound memory, and
+  # truncating an image past its header would make the decoder reject it
+  # anyway. 10 MiB comfortably covers photos; 5 MiB covers HTML/JSON pages.
+  max_image_body: 10MiB
+  max_text_body:  5MiB
   max_video_body: 500MiB
+
+  # Shared secret the proxy presents to the API (`Authorization: Bearer
+  # <token>`) on /v1/decide, /v1/runtime and /v1/quota/heartbeat. The api
+  # service must be configured with the same value (config `proxy.api_token`
+  # or the SEENOEVIL_PROXY_TOKEN env var). Generate one, e.g.:
+  #   openssl rand -hex 32
+  api_token: ""
+
+  # When true, classifier / policy failures BLOCK instead of allowing
+  # through. The default (false) is fail-open: an unhealthy classifier or
+  # API degrades filtering but does not break the network. Set true for
+  # strict enforcement at the cost of availability.
+  fail_closed: false
 
   # Text inspection mode (M4). The proxy extracts natural-language text from
   # HTML and JSON response bodies and runs it through the text classifier.
@@ -188,8 +203,9 @@ auth:
 # -----------------------------------------------------------------------------
 classifiers:
   image:
-    # `freepik`   = Freepik/nsfw_image_detector (multi-class, soft+hard NSFW)
-    # `falconsai` = Falconsai/nsfw_image_detection (binary, smaller / faster)
+    # `freepik` = Freepik/nsfw_image_detector (multi-class, soft+hard NSFW).
+    # This is the only supported variant (the old `falconsai` alias shipped
+    # no ONNX export and silently downloaded the same freepik file).
     model: freepik
 
     # Inference backend. `cpu` works everywhere. `cuda` / `openvino` / `coreml`
@@ -337,6 +353,10 @@ scanner:
   profile: discovery
   # Pull the IEEE OUI database for vendor lookup. Cached locally after first pull.
   enrich_with_oui: true
+  # Shared secret the scanner presents to the API (`Authorization: Bearer
+  # <token>`) on /v1/devices/discover. The api service must be configured
+  # with the same value (this field or the SCANNER_API_TOKEN env var).
+  api_token: ""
 
 
 # -----------------------------------------------------------------------------

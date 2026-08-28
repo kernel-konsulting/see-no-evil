@@ -48,19 +48,26 @@
 | User installs their own VPN | Outside our control on the device; recommend network segmentation that blocks unknown UDP outbound. |
 | Image classifier evaded by adversarial perturbations | Classifier is one of several layers. Text + URL + DNS still fire. |
 | Removing the see-no-evil CA from device trust store | Then HTTPS to MITM'd domains breaks loudly — they get a cert error, not silent bypass. |
+| Spoofing another device's identity to inherit its profile (`X-Device-Mac` / `X-Forwarded-For` headers) | The proxy ignores client-supplied identity headers entirely and attributes by the TCP source IP; the API resolves devices IP-first (scanner-learned IP→MAC) or by device id. A filtered device can still *change its own IP* (DHCP) to escape attribution — same exposure as any IP-based filter. |
+| Crafting requests straight at the API to bypass `/v1/decide` | The API is on the pod's internal network; `/v1/decide`, `/v1/runtime`, `/v1/quota/heartbeat` require the proxy bearer token, `/v1/devices/discover` requires the scanner token, and Caddy refuses those routes at the edge. |
 
 ## Security architecture decisions
 
 - **Default-deny egress for inspection containers.** Image / text / video
   classifiers and the API have no internet access. Only the `updater` does, on
   a schedule.
-- **MITM CA private key encrypted at rest** with `age`. Passphrase is prompted
-  at install and never stored on disk.
-- **Audit log is append-only** at the application layer; rows are signed with
-  an HMAC keyed off a secret at startup so tampering is detectable.
+- **MITM CA private key encrypted at rest** with AES-256-GCM (key derived via
+  PBKDF2-HMAC-SHA256) when `PROXY_CA_PASSPHRASE` is set; the proxy refuses to
+  start without the passphrase if the key was written encrypted.
+- **Audit log integrity.** Every `audit_decisions` row is signed with an
+  HMAC-SHA256 keyed off a per-install secret; `/v1/audit` reports
+  `signature_valid` so tampering (e.g. scrubbing history in the SQLite file)
+  is detectable. Rows predating the signature column report `null`.
+- **Pinned model revisions.** Model weights and the tokenizer are pinned by
+  SHA-256 in the updater catalogue; the updater refuses mismatched files.
 - **No outbound telemetry.** Ever. Hard architectural rule.
-- **Pinned model revisions.** Update only via a deliberate config bump.
-- **Secrets via files**, not env vars (mountable as Docker / K8s secrets).
+- **Secrets via files / env**, not baked into images (mountable as Docker /
+  K8s secrets).
 
 ## Things we explicitly punt on (M0)
 

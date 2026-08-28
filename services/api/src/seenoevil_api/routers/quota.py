@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import require_proxy_factory
 from ..models import Device, Quota
 from ..schemas import QuotaHeartbeat, QuotaStatus
 
@@ -25,18 +26,22 @@ from ..schemas import QuotaHeartbeat, QuotaStatus
 def _resolve_device(session: Session, body: QuotaHeartbeat) -> Device | None:
     if body.device_id is not None:
         return session.get(Device, body.device_id)
+    if body.client_ip:
+        return session.scalars(select(Device).where(Device.ip == body.client_ip)).first()
     if body.device_mac:
         return session.scalars(select(Device).where(Device.mac == body.device_mac)).first()
     return None
 
 
-def make_router(get_session_dep, require_admin) -> APIRouter:
+def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     r = APIRouter(prefix="/v1/quota", tags=["quota"])
+    require_proxy = require_proxy_factory(get_config)
 
     @r.post("/heartbeat", response_model=QuotaStatus)
     def heartbeat(
         body: QuotaHeartbeat,
         session: Session = Depends(get_session_dep),
+        _proxy: str = Depends(require_proxy),
     ) -> QuotaStatus:
         device = _resolve_device(session, body)
         if device is None:

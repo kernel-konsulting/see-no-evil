@@ -4,7 +4,6 @@ package safesearch
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -39,13 +38,14 @@ func RewriteRequest(r *http.Request, cfg Config) {
 
 func enforceGoogleSafeSearch(r *http.Request) {
 	// Google SafeSearch: ?safe=active on web search.
-	// Also set Pref cookie for persistence (belt and braces).
+	// Also force the PREF cookie (overwriting any client-set value — a
+	// pre-existing cookie must not be able to disable SafeSearch).
 	q := r.URL.Query()
 	q.Set("safe", "active")
 	r.URL.RawQuery = q.Encode()
 
-	// Inject SafeSearch preference cookie.
-	setCookieIfAbsent(r, "PREF", "f2=8000000")
+	// Force SafeSearch preference cookie.
+	setCookie(r, "PREF", "f2=8000000")
 }
 
 func enforceBingSafeSearch(r *http.Request) {
@@ -61,11 +61,10 @@ func enforceDDGSafeSearch(r *http.Request) {
 }
 
 func enforceYouTubeRestricted(r *http.Request) {
-	// YouTube Restricted Mode is enforced via a cookie.
-	// PREF with f2=8000000 sets SafeSearch; Restricted Mode needs:
-	setCookieIfAbsent(r, "PREF", "f2=8000000")
-	// The Restricted Mode toggle lives in a separate YT cookie.
-	setCookieIfAbsent(r, "VISITOR_INFO1_LIVE", "")
+	// YouTube Restricted Mode is enforced via cookies. Both must be forced
+	// (overwriting client-set values) or a pre-set cookie disables the mode.
+	setCookie(r, "PREF", "f2=8000000")
+	setCookie(r, "VISITOR_INFO1_LIVE", "")
 	// Inject the YouTube-specific restricted header (only honoured server-side).
 	r.Header.Set("Youtube-Restrict", "Strict")
 }
@@ -90,17 +89,20 @@ func isYouTube(host string) bool {
 	return strings.Contains(host, "youtube.com") || strings.Contains(host, "youtu.be")
 }
 
-func setCookieIfAbsent(r *http.Request, name, value string) {
+// setCookie writes name=value into the request's Cookie header, removing any
+// existing cookie with the same name first. Enforced cookies must overwrite —
+// a client that pre-sets its own PREF/VISITOR_INFO1_LIVE cookie would
+// otherwise keep SafeSearch / Restricted Mode disabled. Values are written
+// verbatim (cookie values must not be percent-encoded — Go's parser would
+// hand the escaped form back to the upstream server).
+func setCookie(r *http.Request, name, value string) {
+	var kept []string
 	for _, c := range r.Cookies() {
 		if c.Name == name {
-			return
+			continue
 		}
+		kept = append(kept, c.Name+"="+c.Value)
 	}
-	existing := r.Header.Get("Cookie")
-	newCookie := url.QueryEscape(name) + "=" + url.QueryEscape(value)
-	if existing == "" {
-		r.Header.Set("Cookie", newCookie)
-	} else {
-		r.Header.Set("Cookie", existing+"; "+newCookie)
-	}
+	kept = append(kept, name+"="+value)
+	r.Header.Set("Cookie", strings.Join(kept, "; "))
 }

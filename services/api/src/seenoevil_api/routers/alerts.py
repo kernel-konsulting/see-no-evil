@@ -18,16 +18,33 @@ Each alert is reshaped into the same notification payload used for block
 events and forwarded via ntfy / webhook (whatever ``notifications:`` in
 config says). No DB writes — alerts are ephemeral and re-fired by vmalert
 on every evaluation while the condition holds.
+
+Auth: when the SEENOEVIL_ALERTS_TOKEN env var is set, requests must present
+``Authorization: Bearer <token>``. vmalert is configured with the matching
+``--notifier.headers`` value. When unset, the endpoint is open (default
+compose keeps vmalert on the internal network).
 """
 
 from __future__ import annotations
 
+import hmac
+import os
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
 from .. import notifications
 from ..config import AppConfig
+
+
+def _require_alerts_token(request: Request) -> None:
+    expected = os.environ.get("SEENOEVIL_ALERTS_TOKEN")
+    if not expected:
+        return
+    auth = request.headers.get("Authorization", "")
+    provided = auth[len("Bearer ") :].strip() if auth.startswith("Bearer ") else ""
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid alerts token")
 
 
 def make_router(get_config) -> APIRouter:
@@ -37,8 +54,10 @@ def make_router(get_config) -> APIRouter:
     def receive_webhook(
         body: dict[str, Any],
         background: BackgroundTasks,
+        request: Request,
         config: AppConfig = Depends(get_config),
     ) -> None:
+        _require_alerts_token(request)
         cfg = config.notifications
         if not cfg.enabled:
             return
