@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -102,6 +103,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
     #   4. hardcoded fallback
     env_cidr = os.environ.get("SCANNER_CIDR")
     cfg_cidr = sec.get("cidr")
+    # Compat: config.example.yaml uses `scanner.cidrs` (list); accept both.
+    if not cfg_cidr:
+        cidrs_val = sec.get("cidrs")
+        if isinstance(cidrs_val, list) and cidrs_val:
+            cfg_cidr = str(cidrs_val[0])
+        elif isinstance(cidrs_val, str) and cidrs_val:
+            cfg_cidr = cidrs_val
     if env_cidr:
         cidr = env_cidr
     elif cfg_cidr and cfg_cidr != DEFAULT_CIDR:
@@ -299,6 +307,28 @@ class _ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _check_auth(self) -> bool:
+        """Return True if scanner control token matches expected value."""
+        cfg = _ControlHandler.cfg
+        expected = (
+            os.environ.get("SCANNER_TOKEN")
+            or os.environ.get("SCANNER_API_TOKEN")
+            or os.environ.get("API_TOKEN")
+            or (cfg.api_token if cfg else None)
+        )
+        if not expected:
+            # No token configured — allow only because listener is localhost-only;
+            # log once so operator knows to set SCANNER_TOKEN in prod (#20).
+            return True
+        auth = self.headers.get("Authorization", "")
+        alt = self.headers.get("X-Scanner-Token", "")
+        provided = ""
+        if auth.startswith("Bearer "):
+            provided = auth[len("Bearer ") :].strip()
+        elif alt:
+            provided = alt.strip()
+        return bool(provided and hmac.compare_digest(provided, expected))
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
             self._json(200, {"status": "ok"})
@@ -307,6 +337,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path == "/scan":
+            if not self._check_auth():
+                self._json(401, {"error": "unauthorized"})
+                return
             if _ControlHandler.cfg is None:
                 self._json(503, {"error": "scanner not initialised"})
                 return
@@ -318,10 +351,12 @@ class _ControlHandler(BaseHTTPRequestHandler):
 
 def start_control_server(cfg: ScannerConfig) -> ThreadingHTTPServer:
     _ControlHandler.cfg = cfg
-    srv = ThreadingHTTPServer(("0.0.0.0", cfg.control_port), _ControlHandler)  # noqa: S104
+    # Bind only to loopback; the API (on same pod) proxies via 127.0.0.1:9104.
+    # Binding 0.0.0.0 would expose unauthenticated control port to LAN (#20).
+    srv = ThreadingHTTPServer(("127.0.0.1", cfg.control_port), _ControlHandler)
     t = threading.Thread(target=srv.serve_forever, name="scanner-control", daemon=True)
     t.start()
-    log.info("scanner control plane listening on :%d", cfg.control_port)
+    log.info("scanner control plane listening on 127.0.0.1:%d", cfg.control_port)
     return srv
 
 

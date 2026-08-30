@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,8 +27,12 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     require_admin_or_scanner = require_admin_or_scanner_factory(get_session_dep, get_config)
 
     @r.get("", response_model=list[DeviceOut], dependencies=[Depends(require_admin)])
-    def list_devices(session: Session = Depends(get_session_dep)) -> list[Device]:
-        return list(session.scalars(select(Device).order_by(Device.id)))
+    def list_devices(
+        session: Session = Depends(get_session_dep),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[Device]:
+        return list(session.scalars(select(Device).order_by(Device.id).offset(offset).limit(limit)))
 
     @r.get("/{device_id}", response_model=DeviceOut, dependencies=[Depends(require_admin)])
     def get_device(device_id: int, session: Session = Depends(get_session_dep)) -> Device:

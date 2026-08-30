@@ -11,6 +11,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .models import AuditDecision, QuarantineItem
@@ -29,20 +30,49 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
     if retention_days <= 0:
         return {"audit": 0, "quarantine": 0}
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
-    audit_deleted = (
-        session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount or 0
-    )
-    quarantine_deleted = (
-        session.execute(
-            delete(QuarantineItem).where(
-                QuarantineItem.status != "pending",
-                QuarantineItem.resolved_at.is_not(None),
-                QuarantineItem.resolved_at < cutoff,
+    try:
+        audit_deleted = (
+            session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount or 0
+        )
+        quarantine_deleted = (
+            session.execute(
+                delete(QuarantineItem).where(
+                    QuarantineItem.status != "pending",
+                    QuarantineItem.resolved_at.is_not(None),
+                    QuarantineItem.resolved_at < cutoff,
+                )
+            ).rowcount
+            or 0
+        )
+        session.commit()
+    except OperationalError:
+        # SQLite busy (database is locked) even after busy_timeout; retry
+        # once after a short back-off so the daily cleanup doesn't wedged.
+        session.rollback()
+        log.warning("retention cleanup busy, retrying once")
+        try:
+            import time
+
+            time.sleep(0.2)
+            audit_deleted = (
+                session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount
+                or 0
             )
-        ).rowcount
-        or 0
-    )
-    session.commit()
+            quarantine_deleted = (
+                session.execute(
+                    delete(QuarantineItem).where(
+                        QuarantineItem.status != "pending",
+                        QuarantineItem.resolved_at.is_not(None),
+                        QuarantineItem.resolved_at < cutoff,
+                    )
+                ).rowcount
+                or 0
+            )
+            session.commit()
+        except OperationalError:
+            session.rollback()
+            log.warning("retention cleanup still busy, skipping this cycle")
+            return {"audit": 0, "quarantine": 0}
     if audit_deleted or quarantine_deleted:
         log.info(
             "retention cleanup: deleted %d audit rows, %d quarantine rows (retention=%dd)",

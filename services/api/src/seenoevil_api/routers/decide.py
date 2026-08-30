@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .. import audit_sig, notifications, panic, runtime
@@ -17,6 +19,10 @@ from ..policy import DecisionInput, DecisionOutput, GlobalRules, ProfileView, de
 from ..schemas import DecideRequest, DecideResponse
 
 log = logging.getLogger("seenoevil_api.decide")
+
+# Max base64 thumbnail size stored in audit/quarantine. Matches the
+# Pydantic max_length on DecideRequest.thumbnail_b64 (#41, #12).
+MAX_THUMBNAIL_B64 = 50000
 
 
 def _profile_view(p: Profile) -> ProfileView:
@@ -193,7 +199,14 @@ def make_router(get_session_dep, get_config) -> APIRouter:
             if body.client_ip and device.ip != body.client_ip:
                 device.ip = body.client_ip
 
-        now = datetime.now(UTC)
+        # Use pod-local timezone for schedule checks; UTC would shift windows
+        # for non-UTC deployments (#29).
+        try:
+            tz = ZoneInfo(config.pod.timezone or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            log.warning("invalid pod timezone %r, falling back to UTC", config.pod.timezone)
+            tz = ZoneInfo("UTC")
+        now = datetime.now(tz)
         dow, t, today = now_parts(now)
         panic_state = panic.get_state(session)
         if panic_state.active:
@@ -217,6 +230,14 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                 global_rules=_global_rules(session),
             )
 
+        # Bound thumbnail size before persisting to avoid unbounded Text growth
+        # (#12, #41). Oversize previews are dropped rather than rejecting the
+        # whole decision — the proxy always has a valid verdict.
+        thumb = body.thumbnail_b64
+        if thumb is not None and len(thumb) > MAX_THUMBNAIL_B64:
+            log.warning("dropping oversize thumbnail_b64", extra={"size": len(thumb)})
+            thumb = None
+
         audit_row = AuditDecision(
             device_id=device.id if device else None,
             profile_id=profile.id,
@@ -225,7 +246,7 @@ def make_router(get_session_dep, get_config) -> APIRouter:
             decision=decision.decision,
             reason=decision.reason,
             classifier_scores=dict(body.classifier_scores),
-            thumbnail_b64=body.thumbnail_b64,
+            thumbnail_b64=thumb,
         )
         session.add(audit_row)
         # Flush so id/ts are populated, then sign the row (tamper detection).
@@ -241,12 +262,28 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                     content_type=body.content_type,
                     reason=decision.reason,
                     classifier_scores=dict(body.classifier_scores),
-                    thumbnail_b64=body.thumbnail_b64,
+                    thumbnail_b64=thumb,
                     status="pending",
                 )
             )
 
-        session.commit()
+        try:
+            session.commit()
+        except OperationalError:
+            session.rollback()
+            log.warning("decide commit busy, returning decision without audit persistence")
+            # Still return the policy decision — the audit/quarantine row will be
+            # missing but the user experience (allow/block) must not fail due to
+            # a transient SQLite busy.
+            return DecideResponse(
+                decision=decision.decision,
+                reason=decision.reason,
+                profile=profile.name,
+                device_id=device.id if device else None,
+            )
+        except Exception:
+            session.rollback()
+            raise
 
         if (
             decision.decision == "block"

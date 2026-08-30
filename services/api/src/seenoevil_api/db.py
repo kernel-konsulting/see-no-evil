@@ -40,11 +40,15 @@ def build_engine(config: AppConfig) -> Engine:
     engine = create_engine(url, **kwargs)
 
     if _is_sqlite(url):
-        # Enforce foreign keys on SQLite (off by default).
+        # Enforce foreign keys on SQLite (off by default) and tune for
+        # concurrent writers: WAL mode, busy timeout and NORMAL sync.
         @event.listens_for(engine, "connect")
         def _fk_pragma_on_connect(dbapi_conn, _record):  # pragma: no cover - trivial
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
 
     return engine

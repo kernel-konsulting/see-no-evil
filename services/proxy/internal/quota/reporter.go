@@ -88,14 +88,25 @@ func (r *Reporter) flush(ctx context.Context) {
 		if m <= 0 {
 			continue
 		}
-		if err := r.flushFn(ctx, ip, m); err != nil {
-			slog.Warn("quota heartbeat failed", "ip", ip, "minutes", m, "err", err)
+		toSend := m
+		if toSend > maxReportedMinutes {
+			toSend = maxReportedMinutes
+		}
+		if err := r.flushFn(ctx, ip, toSend); err != nil {
+			slog.Warn("quota heartbeat failed", "ip", ip, "minutes", toSend, "err", err)
 			continue // keep counters for the next tick
 		}
-		slog.Debug("quota heartbeat sent", "ip", ip, "minutes", m)
+		slog.Debug("quota heartbeat sent", "ip", ip, "minutes", toSend)
 		r.mu.Lock()
-		if r.minutes[ip] == m {
+		cur := r.minutes[ip]
+		if cur <= toSend {
 			delete(r.minutes, ip)
+		} else {
+			// Capped post (e.g. 2000 minutes accumulated but only 1440 sent)
+			// must leave the remainder for the next tick instead of deleting
+			// it (#16). Also handles the race where accumulate ran during the
+			// blocking HTTP post and bumped cur beyond m.
+			r.minutes[ip] = cur - toSend
 		}
 		r.mu.Unlock()
 	}

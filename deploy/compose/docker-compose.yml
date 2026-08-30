@@ -74,7 +74,9 @@ services:
       SEENOEVIL_DATA_DIR: /data
       # Pre-set these to skip interactive prompts in automated installs:
       # SEENOEVIL_INITIAL_ADMIN_EMAIL: admin@example.local
-      SEENOEVIL_INITIAL_ADMIN_PASSWORD: changeme
+      # IMPORTANT: Change SEENOEVIL_INITIAL_ADMIN_PASSWORD from the default!
+      # Generate with: openssl rand -base64 24
+      SEENOEVIL_INITIAL_ADMIN_PASSWORD: "${SEENOEVIL_INITIAL_ADMIN_PASSWORD:-}"
       # SNE_HOSTNAME: seenoevil.lan
     entrypoint: ["seenoevil-setup"]
 

@@ -43,7 +43,7 @@ def make_router(require_admin) -> APIRouter:
                 detail=f"scanner returned non-JSON ({resp.status_code}): {resp.text[:200]}",
             ) from exc
         if resp.status_code >= 400 or not payload.get("ok"):
-            raise HTTPException(status_code=502, detail=payload)
+            raise HTTPException(status_code=502, detail=str(payload))
         return payload
 
     @r.get("/health", dependencies=[Depends(require_admin)])
