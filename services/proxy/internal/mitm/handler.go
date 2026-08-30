@@ -1232,14 +1232,6 @@ func effectiveIsImage(ct string, body []byte) bool {
 	return len(body) > 0 && looksLikeImage(body)
 }
 
-func effectiveIsVideo(ct string, body []byte) bool {
-	if isVideo(ct) {
-		return true
-	}
-	// Video sniff is less reliable; only treat generic CT with large body as video if not image
-	return false
-}
-
 func effectiveIsText(ct string, body []byte) bool {
 	if textextract.IsSupported(ct) {
 		return true
