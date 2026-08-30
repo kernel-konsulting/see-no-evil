@@ -24,7 +24,6 @@ import os
 import time
 from concurrent import futures
 from pathlib import Path
-from xml.etree import ElementTree
 
 import grpc
 import numpy as np
@@ -36,7 +35,7 @@ from prometheus_client import Counter, Histogram, start_http_server
 from .generated import classify_pb2, classify_pb2_grpc
 
 try:
-    from defusedxml.ElementTree import fromstring as _safe_fromstring  # type: ignore[import-untyped]
+    from defusedxml.ElementTree import fromstring as _safe_fromstring  # type: ignore[import-untyped]  # noqa: I001
 except ImportError:
     _safe_fromstring = None  # type: ignore[assignment]
 

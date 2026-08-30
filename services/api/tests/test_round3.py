@@ -273,7 +273,6 @@ def test_secure_cookies_via_forwarded_proto(base_config: AppConfig, monkeypatch)
 
 
 def test_backup_rejects_fifo_and_device(tmp_path: Path) -> None:
-
     from seenoevil_api.backup import restore
     from seenoevil_api.config import (
         AllowDeny,
@@ -609,6 +608,7 @@ def test_image_thresholds_sync_drawing_alias() -> None:
 
 
 def test_scanner_host_network_fallback_urlparse(monkeypatch) -> None:
+    pytest.importorskip("seenoevil_scanner")
     from seenoevil_scanner.scanner import load_config
 
     monkeypatch.setenv("API_BASE", "http://api:8000/")

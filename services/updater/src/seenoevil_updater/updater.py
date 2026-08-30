@@ -32,12 +32,14 @@ HTTP_TIMEOUT   Seconds for HTTP requests (default 120).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,28 +157,26 @@ def _download(client: httpx.Client, artefact: Artefact, dest_dir: Path) -> None:
                 last_exc = exc
                 if attempt < 3:
                     backoff = 2 ** (attempt - 1)
-                    log.warning("download %s attempt %d failed: %s — retrying in %ds", artefact.dest, attempt, exc, backoff)
-                    import time as _time
-
-                    _time.sleep(backoff)
+                    log.warning(
+                        "download %s attempt %d failed: %s — retrying in %ds",
+                        artefact.dest,
+                        attempt,
+                        exc,
+                        backoff,
+                    )
+                    time.sleep(backoff)
                     # Truncate partial download before retry
-                    try:
+                    with contextlib.suppress(Exception):
                         tmp.seek(0)
                         tmp.truncate(0)
-                    except Exception:
-                        pass
                 else:
-                    try:
+                    with contextlib.suppress(Exception):
                         tmp.close()
-                    except Exception:
-                        pass
                     tmp_path.unlink(missing_ok=True)
                     raise
         if last_exc is not None:
-            try:
+            with contextlib.suppress(Exception):
                 tmp.close()
-            except Exception:
-                pass
             tmp_path.unlink(missing_ok=True)
             raise last_exc
 
