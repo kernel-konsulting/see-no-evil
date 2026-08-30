@@ -100,6 +100,14 @@ func (p ProxyConfig) MaxInspectBytes() int64 {
 // that io.LimitReader effectively reads to EOF, small enough to fit in int64.
 const unlimited int64 = 1 << 62
 
+// Hard caps protect the proxy from OOM when configured to "unlimited" or an
+// excessively large value. Even with unlimited, we must bound buffered bodies.
+const (
+	hardMaxImage = 20 << 20  // 20 MiB
+	hardMaxText  = 5 << 20   // 5 MiB
+	hardMaxVideo = 500 << 20 // 500 MiB
+)
+
 func parseLimit(s string, fallback int64) int64 {
 	trim := strings.ToLower(strings.TrimSpace(s))
 	switch trim {
@@ -112,20 +120,33 @@ func parseLimit(s string, fallback int64) int64 {
 }
 
 // MaxImageBytes returns the cap for image bodies. Default = unlimited so the
-// classifier always sees a complete, decodable image.
+// classifier always sees a complete, decodable image, capped at hardMaxImage.
 func (p ProxyConfig) MaxImageBytes() int64 {
-	return parseLimit(p.MaxImageBody, unlimited)
+	v := parseLimit(p.MaxImageBody, unlimited)
+	if v > hardMaxImage {
+		return hardMaxImage
+	}
+	return v
 }
 
-// MaxTextBytes returns the cap for HTML/JSON/text bodies. Default = unlimited.
+// MaxTextBytes returns the cap for HTML/JSON/text bodies. Default = unlimited,
+// capped at hardMaxText.
 func (p ProxyConfig) MaxTextBytes() int64 {
-	return parseLimit(p.MaxTextBody, unlimited)
+	v := parseLimit(p.MaxTextBody, unlimited)
+	if v > hardMaxText {
+		return hardMaxText
+	}
+	return v
 }
 
 // MaxVideoBytes returns the cap for buffered video bodies. Default = 500 MiB
 // (the sampler still streams frames evenly across whatever was buffered).
 func (p ProxyConfig) MaxVideoBytes() int64 {
-	return parseLimit(p.MaxVideoBody, 500<<20)
+	v := parseLimit(p.MaxVideoBody, 500<<20)
+	if v > hardMaxVideo {
+		return hardMaxVideo
+	}
+	return v
 }
 
 type ClassifiersConfig struct {

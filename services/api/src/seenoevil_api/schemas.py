@@ -17,6 +17,7 @@ class ProfileBase(BaseModel):
     schedule: dict[str, str] = Field(default_factory=dict)
     quota_minutes_per_day: int = 0
     allow_domains: list[str] = Field(default_factory=list)
+    enforce_allowlist: bool = False
     deny_domains: list[str] = Field(default_factory=list)
     deny_url_keywords: list[str] = Field(default_factory=list)
     allow_youtube_channels: list[str] = Field(default_factory=list)
@@ -29,11 +30,13 @@ class ProfileCreate(ProfileBase):
 
 
 class ProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = None
     image_thresholds: dict[str, float] | None = None
     schedule: dict[str, str] | None = None
     quota_minutes_per_day: int | None = None
     allow_domains: list[str] | None = None
+    enforce_allowlist: bool | None = None
     deny_domains: list[str] | None = None
     deny_url_keywords: list[str] | None = None
     allow_youtube_channels: list[str] | None = None
@@ -146,7 +149,8 @@ class DecideRequest(BaseModel):
     reason: str | None = None
     # Optional small base64-encoded blurred preview, supplied by the proxy
     # for image/video responses so the quarantine queue can render thumbnails.
-    thumbnail_b64: str | None = None
+    # Bounded to avoid unbounded audit/quarantine growth (#41, #12).
+    thumbnail_b64: str | None = Field(default=None, max_length=50000)
 
     @field_validator("device_mac")
     @classmethod
@@ -235,3 +239,68 @@ class QuarantineOut(BaseModel):
     flag_note: str | None = None
     flagged_by: str | None = None
     flagged_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Runtime settings — mirrors runtime.DEFAULTS (lives here for OpenAPI)
+# ---------------------------------------------------------------------------
+
+
+class RuntimeInspect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    image: bool = True
+    video: bool = True
+    text: bool = True
+    domain: bool = True
+    url: bool = True
+
+
+class RuntimeLists(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    global_allow_domains: list[str] = Field(default_factory=list)
+    enforce_global_allowlist: bool = False
+    global_deny_domains: list[str] = Field(default_factory=list)
+    global_deny_keywords: list[str] = Field(default_factory=list)
+
+
+class RuntimeText(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    nsfw_threshold: float = 0.5
+
+
+class RuntimeImage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sexy_threshold: float = 0.6
+    porn_threshold: float = 0.5
+    hentai_threshold: float = 0.5
+
+
+class RuntimeNotifications(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    ntfy_url: str = ""
+    webhook_url: str = ""
+    webhook_token: str = ""
+    on_block: bool = True
+    on_quarantine: bool = True
+    on_panic: bool = True
+
+
+class RuntimeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    inspect: RuntimeInspect = Field(default_factory=RuntimeInspect)
+    lists: RuntimeLists = Field(default_factory=RuntimeLists)
+    text: RuntimeText = Field(default_factory=RuntimeText)
+    image: RuntimeImage = Field(default_factory=RuntimeImage)
+    notifications: RuntimeNotifications = Field(default_factory=RuntimeNotifications)
+
+
+class RuntimePatch(BaseModel):
+    """Partial update for PUT /v1/settings. Extra top-level keys are forbidden."""
+
+    model_config = ConfigDict(extra="forbid")
+    inspect: RuntimeInspect | None = None
+    lists: RuntimeLists | None = None
+    text: RuntimeText | None = None
+    image: RuntimeImage | None = None
+    notifications: RuntimeNotifications | None = None

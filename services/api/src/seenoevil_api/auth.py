@@ -10,6 +10,7 @@ declared in the schema but not yet consumed.
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import secrets
 import threading
@@ -27,9 +28,15 @@ from sqlalchemy.orm import Session
 from .config import AppConfig
 from .models import Setting, User
 
+log = logging.getLogger("seenoevil_api.auth")
+
 SESSION_COOKIE = "seenoevil_session"
-SESSION_TTL = timedelta(hours=12)
+# 4h reduces window after password change / disable; was 12h (#34).
+SESSION_TTL = timedelta(hours=4)
 JWT_ALG = "HS256"
+# Double-submit CSRF cookie/header names (utility, not yet wired globally).
+CSRF_COOKIE = "seenoevil_csrf"
+CSRF_HEADER = "x-csrf-token"
 
 _PWD_KEY = "auth.admin_password_hash"
 _EMAIL_KEY = "auth.admin_email"
@@ -104,9 +111,13 @@ def admin_is_configured(session: Session) -> bool:
 
 def verify_admin(session: Session, email: str, password: str) -> bool:
     norm = email.strip().lower()
-    # Prefer the multi-user table.
+    # Prefer the multi-user table. If a User row exists we must NOT fall
+    # back to the legacy settings row — otherwise a disabled admin could
+    # still log in via the old hash (#6, #7).
     user = session.scalars(select(User).where(User.email == norm)).first()
-    if user is not None and not user.disabled:
+    if user is not None:
+        if user.disabled:
+            return False
         try:
             _hasher.verify(user.password_hash, password)
             return True
@@ -191,7 +202,27 @@ def delete_user(session: Session, user_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def issue_session(session: Session, response: Response, email: str) -> str:
+def _secure_cookies(request: Request | None = None) -> bool:
+    """Whether session/csrf cookies should be marked Secure.
+
+    In production Caddy terminates TLS and all admin traffic is https, so
+    Secure must be True. For local http dev without TLS, set
+    SNE_SECURE_COOKIES=0 or pass an http Request.
+    """
+    env = os.environ.get("SNE_SECURE_COOKIES", "").lower()
+    if env in ("0", "false", "no", "off"):
+        return False
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if request is not None:
+        return request.url.scheme == "https"
+    # Default: secure in prod (even behind Caddy, the browser still sees https).
+    return True
+
+
+def issue_session(
+    session: Session, response: Response, email: str, request: Request | None = None
+) -> str:
     secret = _ensure_jwt_secret(session)
     now = datetime.now(UTC)
     payload = {
@@ -200,13 +231,29 @@ def issue_session(session: Session, response: Response, email: str) -> str:
         "exp": int((now + SESSION_TTL).timestamp()),
     }
     token = jwt.encode(payload, secret, algorithm=JWT_ALG)
+    secure = _secure_cookies(request)
+    # Caddy terminates TLS in front; browser still sees https, so Secure=True.
+    # samesite=strict is strongest for admin session; lax would allow top-level
+    # GET navigations but strict prevents CSRF more fully (combined with
+    # double-submit token below).
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
         max_age=int(SESSION_TTL.total_seconds()),
         httponly=True,
-        samesite="lax",
-        secure=False,  # Caddy terminates TLS in front; behind proxy this is fine.
+        samesite="strict",
+        secure=secure,
+        path="/",
+    )
+    # Double-submit CSRF cookie (readable by JS, compared to X-CSRF-Token header).
+    csrf = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=CSRF_COOKIE,
+        value=csrf,
+        max_age=int(SESSION_TTL.total_seconds()),
+        httponly=False,
+        samesite="strict",
+        secure=secure,
         path="/",
     )
     return token
@@ -214,6 +261,38 @@ def issue_session(session: Session, response: Response, email: str) -> str:
 
 def clear_session(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
+
+
+def issue_csrf_token(response: Response, request: Request | None = None) -> str:
+    """Set a fresh CSRF double-submit cookie and return its value."""
+    secure = _secure_cookies(request)
+    token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=CSRF_COOKIE,
+        value=token,
+        max_age=int(SESSION_TTL.total_seconds()),
+        httponly=False,
+        samesite="strict",
+        secure=secure,
+        path="/",
+    )
+    return token
+
+
+def verify_csrf(request: Request) -> None:
+    """Double-submit CSRF check for state-changing methods (utility).
+
+    Compares the CSRF_COOKIE (set by issue_session) with the X-CSRF-Token
+    header. Not yet wired globally; routers can call this in dependencies.
+    """
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        cookie_token = request.cookies.get(CSRF_COOKIE)
+        header_token = request.headers.get(CSRF_HEADER) or request.headers.get("x-csrf-token")
+        if not cookie_token or not header_token:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf token missing")
+        if not hmac.compare_digest(cookie_token, header_token):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf validation failed")
 
 
 def _decode(session: Session, token: str) -> dict[str, Any]:
@@ -242,10 +321,14 @@ def require_admin_factory(get_session_dep):
         sub = payload.get("sub")
         if not sub:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
-        # Block non-admin roles. Legacy single-admin (no User row) defaults to admin.
+        # Block non-admin roles and disabled accounts. Legacy single-admin
+        # (no User row) defaults to admin.
         user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
-        if user is not None and user.role != ROLE_ADMIN:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
+        if user is not None and (user.disabled or user.role != ROLE_ADMIN):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "user disabled" if user.disabled else "admin role required",
+            )
         return str(sub)
 
     return _dep
@@ -336,8 +419,21 @@ def clear_rate_limiters() -> None:
     _setup_limiter.clear()
 
 
+# Hosts that are trusted to set X-Forwarded-For (loopback from Caddy / pod).
+_TRUSTED_PROXY_HOSTS = frozenset({"127.0.0.1", "::1", "10.0.0.1", "::ffff:127.0.0.1"})
+
+
 def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    host = request.client.host if request.client else "unknown"
+    # Only trust X-Forwarded-For when the direct peer is a known loopback/trusted
+    # proxy (Caddy on 127.0.0.1). Otherwise a LAN attacker could spoof any IP
+    # and bypass per-IP rate limits (#19).
+    xff = request.headers.get("x-forwarded-for")
+    if xff and host in _TRUSTED_PROXY_HOSTS:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return host
 
 
 def check_rate_limit(limiter: _RateLimiter, request: Request) -> None:
@@ -379,6 +475,7 @@ def require_proxy_factory(get_config):
     ) -> str:
         expected = config.proxy.api_token or os.environ.get("SEENOEVIL_PROXY_TOKEN")
         if not expected:
+            log.warning("proxy token not configured — failing closed on %s", request.url.path)
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "proxy token not configured",
@@ -410,14 +507,23 @@ def require_admin_or_scanner_factory(get_session_dep, get_config):
                 if not sub:
                     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
                 user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
-                if user is not None and user.role != ROLE_ADMIN:
-                    raise HTTPException(status.HTTP_403_FORBIDDEN, "admin role required")
+                if user is not None and (user.disabled or user.role != ROLE_ADMIN):
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        "user disabled" if user.disabled else "admin role required",
+                    )
                 return str(sub)
-            except HTTPException:
-                # Fall through to the scanner token below only when the cookie
-                # itself was invalid; a valid viewer cookie already returned 403.
+            except HTTPException as exc:
+                # Do not swallow 403 (disabled / viewer): those must remain forbidden
+                # and must NOT fall through to the scanner token, otherwise a
+                # disabled admin could still call the endpoint via a scanner token.
+                if exc.status_code == status.HTTP_403_FORBIDDEN:
+                    raise
+                # 401 (invalid/expired cookie) -> fall through to scanner token check.
                 pass
         expected = config.scanner.api_token or os.environ.get("SCANNER_API_TOKEN")
+        if not expected:
+            log.warning("scanner token not configured — failing closed on %s", request.url.path)
         if not _token_matches(_bearer_token(request), expected):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED, "admin session or scanner token required"

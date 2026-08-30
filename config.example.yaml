@@ -140,9 +140,11 @@ proxy:
 
   # When true, classifier / policy failures BLOCK instead of allowing
   # through. The default (false) is fail-open: an unhealthy classifier or
-  # API degrades filtering but does not break the network. Set true for
-  # strict enforcement at the cost of availability.
-  fail_closed: false
+  # API degrades filtering but does not break the network. For a strict
+  # parental-control appliance set true so a DoS on classifiers cannot
+  # silently disable filtering (see docs/hardening.md). Podman/Kubernetes
+  # deployments should use fail_closed: true with liveness checks.
+  fail_closed: true
 
   # Text inspection mode (M4). The proxy extracts natural-language text from
   # HTML and JSON response bodies and runs it through the text classifier.

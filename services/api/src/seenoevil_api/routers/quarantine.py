@@ -49,11 +49,12 @@ def make_router(get_session_dep, require_admin, _require_user, current_user) -> 
     def list_quarantine(
         session: Session = Depends(get_session_dep),
         status_: str = Query(default="pending", alias="status"),
-        limit: int = Query(default=100, ge=1, le=500),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
     ) -> list[QuarantineItem]:
         if status_ not in _VALID_STATUSES and status_ != "all":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid status")
-        stmt = select(QuarantineItem).order_by(QuarantineItem.ts.desc()).limit(limit)
+        stmt = select(QuarantineItem).order_by(QuarantineItem.ts.desc()).offset(offset).limit(limit)
         if status_ != "all":
             stmt = stmt.where(QuarantineItem.status == status_)
         if status_ == "pending":

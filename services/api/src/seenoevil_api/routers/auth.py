@@ -65,7 +65,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
         check_rate_limit(_login_limiter, request)
         if not verify_admin(session, body.email, body.password):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-        issue_session(session, response, body.email)
+        issue_session(session, response, body.email, request)
         session.commit()
         return LoginResponse(email=body.email)
 
@@ -104,6 +104,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
 
     @r.get("/oidc/callback")
     def oidc_callback(
+        request: Request,
         response: Response,
         code: str = Query(...),
         state: str = Query(...),
@@ -120,7 +121,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         redirect = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
-        issue_session(session, redirect, finished.email)
+        issue_session(session, redirect, finished.email, request)
         session.commit()
         return redirect
 
