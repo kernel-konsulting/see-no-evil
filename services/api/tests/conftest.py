@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util as _ilu
 import os
 import tempfile
 from collections.abc import Iterator
@@ -20,6 +21,12 @@ from seenoevil_api.config import (
     ProxyAPIConfig,
     ScannerConfig,
 )
+
+_spec = _ilu.spec_from_file_location("_csrf", Path(__file__).parent / "_csrf.py")
+_mod = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
+assert _spec and _spec.loader
+_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+inject_csrf = _mod.inject_csrf  # type: ignore[attr-defined]
 
 # Shared secrets the test API instance expects from its in-pod clients.
 PROXY_TOKEN = "test-proxy-token"
@@ -43,17 +50,7 @@ class AuthedClient(TestClient):
         headers = kwargs.get("headers") or {}
         kwargs["headers"] = headers
         headers.setdefault("Authorization", f"Bearer {PROXY_TOKEN}")
-        # Mirror UI CSRF handling: copy `seenoevil_csrf` cookie to header.
-        try:
-            csrf = None
-            for cookie in self.cookies.jar:  # type: ignore[attr-defined]
-                if cookie.name == "seenoevil_csrf":
-                    csrf = cookie.value
-                    break
-            if csrf and "x-csrf-token" not in {k.lower() for k in headers}:
-                headers["x-csrf-token"] = csrf
-        except Exception:
-            pass
+        inject_csrf(headers, self.cookies.jar)  # type: ignore[attr-defined]
         return super().request(method, url, **kwargs)
 
 

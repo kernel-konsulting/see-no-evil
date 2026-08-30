@@ -311,24 +311,32 @@ func NewLeafCache(ca *KeyPair) *LeafCache {
 	return &LeafCache{ca: ca, m: make(map[string]leafEntry)}
 }
 
+// canonicalHost returns (cacheKey, leafHost) where cacheKey is lower+trimmed
+// and leafHost is the hostname without port, lower-cased for DNSNames.
+func canonicalHost(host string) (string, string) {
+	h := host
+	if hp, _, err := net.SplitHostPort(host); err == nil {
+		h = hp
+	}
+	h = strings.TrimSuffix(h, ".")
+	cacheKey := strings.ToLower(h)
+	leafHost := strings.ToLower(h)
+	return cacheKey, leafHost
+}
+
 // TLSConfig returns a *tls.Config presenting a leaf certificate for the given
 // SNI host, minting one on first use. Host may include :port which is stripped
 // for caching so example.com:443 and example.com share the same leaf.
 func (lc *LeafCache) TLSConfig(host string) *tls.Config {
-	// Canonicalize for cache key: strip port, lower-case.
-	cacheKey := host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		cacheKey = h
-	}
-	cacheKey = strings.ToLower(strings.TrimSuffix(cacheKey, "."))
+	cacheKey, _ := canonicalHost(host)
 	lc.mu.Lock()
-	defer lc.mu.Unlock()
-
 	if e, ok := lc.m[cacheKey]; ok {
 		e.lastUsed = time.Now()
 		lc.m[cacheKey] = e
+		lc.mu.Unlock()
 		return e.cfg
 	}
+	lc.mu.Unlock()
 
 	leafCert, err := lc.mintLeaf(host)
 	if err != nil {
@@ -339,6 +347,15 @@ func (lc *LeafCache) TLSConfig(host string) *tls.Config {
 	cfg := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{leafCert},
+	}
+
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if e, ok := lc.m[cacheKey]; ok {
+		// Another goroutine minted while we were outside the lock.
+		e.lastUsed = time.Now()
+		lc.m[cacheKey] = e
+		return e.cfg
 	}
 	if len(lc.m) >= leafCacheMaxEntries {
 		lc.evictOldestLocked()
@@ -373,11 +390,8 @@ func (lc *LeafCache) mintLeaf(host string) (tls.Certificate, error) {
 		return tls.Certificate{}, err
 	}
 
-	// Strip port if present.
-	hostname := host
-	if h, _, err2 := net.SplitHostPort(host); err2 == nil {
-		hostname = h
-	}
+	_, leafHost := canonicalHost(host)
+	hostname := leafHost
 
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,

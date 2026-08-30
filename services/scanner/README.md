@@ -20,12 +20,15 @@ Environment variable overrides:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `API_BASE` | `http://api:8000` | API base URL |
+| `API_BASE` | `http://api:8000` | API base URL (auto-fallback to `API_BASE_HOST` when `SCANNER_HOST_NETWORK=1`) |
 | `API_TOKEN` | _(unset)_ | Bearer token for the API (when configured) |
 | `METRICS_PORT` | `9102` | Prometheus metrics endpoint |
 | `LOG_LEVEL` | `INFO` | Log level (DEBUG/INFO/WARNING/ERROR) |
 | `SCANNER_CIDR` | `192.168.1.0/24` | Override CIDR if config absent |
 | `SCANNER_INTERVAL_SECONDS` | `3600` | Override interval if config absent |
+| `SCANNER_HOST_NETWORK` | `0` | `1` when scanner runs with `network_mode: host` — enables `API_BASE_HOST` fallback |
+| `API_BASE_HOST` | `http://127.0.0.1:8000` | Host-accessible API base for `SCANNER_HOST_NETWORK=1` |
+| `SCANNER_TOKEN` | _(unset)_ | Token for control plane `POST /scan` (fail-closed when unset) |
 
 ## Capabilities required
 
@@ -61,3 +64,10 @@ pytest
 
 **M1.6 implemented.** Discovery + reporting working; uses nmap `-sn -PR -n`
 under the hood. Future work tracked in PLAN.md (M7 scanner UI).
+
+**M12 hardening (whole-codebase):**
+
+- `API_BASE` host-network fallback now via `urlparse(hostname=="api")` not string `==`.
+- `perform_scan` uses `try-lock` (`acquire(blocking=False)`) -> `429 scan busy` instead of blocking 300s.
+- Control plane `/scan` now fail-closed (`401` when `SCANNER_TOKEN` unset) even on `127.0.0.1`.
+- Updater retry not in scanner but scanner now logs `host-network mode: using API base` at `INFO`.

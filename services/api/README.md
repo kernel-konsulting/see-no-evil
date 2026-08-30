@@ -113,6 +113,16 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 - `cleanup_expired` uses naive UTC consistently; `panic` audit rows now HMAC-signed.
 - OIDC state bound to browser cookie + `nonce` to prevent fixation.
 
+**M12 review hardening (round 3 — whole-codebase):**
+
+- XFF now uses `ipaddress` CIDR matching, narrow defaults `10.88.0.0/16` + `172.16.0.0/12` + `127.0.0.0/8`, last-value trust, and `forwarded_allow_ips` synced with `SEENOEVIL_TRUSTED_PROXIES`.
+- CSRF bearer bypass closed (session cookie present -> still enforce), `Secure` flag via `X-Forwarded-Proto`, kill-switch logs warning.
+- OIDC nonce verified against `id_token`, discovery cached with 1h TTL, state deleted only after success, missing cookie now `400`.
+- Backup rejects `fifo`/`device` nodes, audit HMAC includes thumbnail hash (with legacy fallback).
+- `cleanup` no longer blocks event loop, wizard no longer leaks token prefix, `ImageThresholds` syncs `drawing`/`drawings`.
+- Proxy `LeafCache` double-checked locking, canonical host helper, `capped()`/`hasImageMagic()`, quota batch lock + backoff.
+- Scanner host-network fallback via `urlparse`, try-lock `429`, fail-closed control plane, updater retry with backoff, rate-limiter sweep.
+
 **Deferred to follow-up M1 PRs:**
 
 - OPA / rego integration (the in-tree policy engine has the same interface,

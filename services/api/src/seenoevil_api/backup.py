@@ -121,12 +121,14 @@ def restore(config: AppConfig, archive: Path) -> None:
     data_dir = _data_dir(config)
     data_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:gz") as tar:
-        # Defence in depth: refuse absolute paths, traversal, and symlinks.
+        # Defence in depth: refuse absolute paths, traversal, symlinks, and devices.
         for member in tar.getmembers():
             if member.name.startswith("/") or ".." in Path(member.name).parts:
                 raise ValueError(f"refusing unsafe path in archive: {member.name!r}")
             if member.issym() or member.islnk():
                 raise ValueError(f"refusing symlink in archive: {member.name!r}")
+            if member.isdev() or member.isfifo():
+                raise ValueError(f"refusing device/fifo in archive: {member.name!r}")
             # Resolve final path and ensure it stays inside data_dir.
             target = (data_dir / member.name).resolve()
             try:
@@ -138,7 +140,7 @@ def restore(config: AppConfig, archive: Path) -> None:
         if filt is not None:
             tar.extractall(data_dir, filter=filt)  # type: ignore[arg-type]
         else:
-            tar.extractall(data_dir)  # noqa: S202 - guarded above
+            tar.extractall(data_dir)  # noqa: S202 - guarded above by manual checks
     log.info("restored %s into %s", archive, data_dir)
 
 

@@ -164,6 +164,11 @@ Never edit generated `*_pb2*.py` or `*.pb.go` files by hand.
 | `TEXT_CLASSIFIER_ADDR` | proxy | gRPC address (default `text-classifier:50052`) |
 | `API_ADDR` | proxy | Policy API address (default `api:8000`) |
 | `PROXY_CA_PASSPHRASE` | proxy | Passphrase for auto-generated CA key |
+| `SEENOEVIL_TRUSTED_PROXIES` | api | Comma-separated CIDRs/IPs trusted for X-Forwarded-For |
+| `SEENOEVIL_DISABLE_CSRF` | api | `1` to disable CSRF (test-only) |
+| `SCANNER_HOST_NETWORK` | scanner | `1` when scanner uses host networking |
+| `API_BASE_HOST` | scanner | Host-accessible API base for `SCANNER_HOST_NETWORK=1` |
+| `SNE_SECURE_COOKIES` | api | `0` to allow http cookies in dev |
 
 ---
 

@@ -29,19 +29,23 @@ type Reporter struct {
 	client  *http.Client
 	flushFn func(ctx context.Context, ip string, minutes int) error // overridable in tests
 
-	mu      sync.Mutex
-	active  map[string]bool // ip → traffic seen in the current minute window
-	minutes map[string]int  // ip → accumulated unflushed minutes
+	mu        sync.Mutex
+	active    map[string]bool // ip → traffic seen in the current minute window
+	minutes   map[string]int  // ip → accumulated unflushed minutes
+	backoff   map[string]time.Time
+	failCount map[string]int
 }
 
 // NewReporter builds a Reporter posting to apiBase/v1/quota/heartbeat.
 func NewReporter(apiBase, token string) *Reporter {
 	r := &Reporter{
-		apiBase: apiBase,
-		token:   token,
-		client:  &http.Client{Timeout: 5 * time.Second},
-		active:  make(map[string]bool),
-		minutes: make(map[string]int),
+		apiBase:   apiBase,
+		token:     token,
+		client:    &http.Client{Timeout: 5 * time.Second},
+		active:    make(map[string]bool),
+		minutes:   make(map[string]int),
+		backoff:   make(map[string]time.Time),
+		failCount: make(map[string]int),
 	}
 	r.flushFn = r.post
 	return r
@@ -60,27 +64,39 @@ func (r *Reporter) NoteActivity(ip string) {
 
 // accumulate credits one active minute to every IP that was active during the
 // previous window, then clears the window. Called once per flush interval.
-// Uses map swap to hold lock for O(1).
+// Uses map swap to hold lock for O(1), then single batch update.
 func (r *Reporter) accumulate() {
 	r.mu.Lock()
 	cur := r.active
 	r.active = make(map[string]bool, len(cur))
 	r.mu.Unlock()
+	need := make([]string, 0, len(cur))
 	for ip, seen := range cur {
 		if seen {
-			r.mu.Lock()
-			r.minutes[ip]++
-			r.mu.Unlock()
+			need = append(need, ip)
 		}
 	}
+	if len(need) == 0 {
+		return
+	}
+	r.mu.Lock()
+	for _, ip := range need {
+		r.minutes[ip]++
+	}
+	r.mu.Unlock()
 }
 
 // flush posts each IP's accumulated minutes and zeroes them on success. On
-// failure the counters are kept so the next tick retries.
+// failure the counters are kept and backoff is applied so a recovering API
+// isn't hammered by all IPs in lockstep.
 func (r *Reporter) flush(ctx context.Context) {
+	now := time.Now()
 	r.mu.Lock()
 	ips := make([]string, 0, len(r.minutes))
 	for ip := range r.minutes {
+		if until, ok := r.backoff[ip]; ok && now.Before(until) {
+			continue
+		}
 		ips = append(ips, ip)
 	}
 	r.mu.Unlock()
@@ -98,10 +114,27 @@ func (r *Reporter) flush(ctx context.Context) {
 		}
 		if err := r.flushFn(ctx, ip, toSend); err != nil {
 			slog.Warn("quota heartbeat failed", "ip", ip, "minutes", toSend, "err", err)
+			// Exponential backoff with jitter: 1m, 2m, 4m, 8m up to 10m + jitter
+			r.mu.Lock()
+			c := r.failCount[ip] + 1
+			if c > 4 {
+				c = 4
+			}
+			r.failCount[ip] = c
+			backoff := time.Duration(1<<uint(c-1)) * time.Minute
+			if backoff > 10*time.Minute {
+				backoff = 10 * time.Minute
+			}
+			// jitter ±10s
+			jitter := time.Duration((now.UnixNano()%20000)-10000) * time.Millisecond
+			r.backoff[ip] = now.Add(backoff + jitter)
+			r.mu.Unlock()
 			continue // keep counters for the next tick
 		}
 		slog.Debug("quota heartbeat sent", "ip", ip, "minutes", toSend)
 		r.mu.Lock()
+		delete(r.backoff, ip)
+		delete(r.failCount, ip)
 		cur := r.minutes[ip]
 		if cur <= toSend {
 			delete(r.minutes, ip)

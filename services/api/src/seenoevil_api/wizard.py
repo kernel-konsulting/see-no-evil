@@ -260,7 +260,7 @@ def main() -> None:
     scanner_token = os.environ.get("SCANNER_API_TOKEN") or ""
     if not proxy_token:
         proxy_token = _generate_token()
-        print(f"  Generated proxy token: {proxy_token[:8]}… (written to config.yaml)")
+        print("  Generated proxy token (written to config.yaml)")
         print("  Also set SEENOEVIL_PROXY_TOKEN env for compose deployments.")
     if not scanner_token:
         scanner_token = _generate_token()

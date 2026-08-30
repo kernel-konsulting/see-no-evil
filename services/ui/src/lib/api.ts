@@ -89,15 +89,19 @@ http.interceptors.response.use(
   },
 );
 
+export function getCsrfToken(): string | null {
+  const match = document.cookie.match(/(?:^|;\s*)seenoevil_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 // Attach double-submit CSRF header for mutating requests.
 http.interceptors.request.use((config) => {
   const method = (config.method ?? "get").toLowerCase();
   if (["post", "put", "patch", "delete"].includes(method)) {
-    // Read CSRF cookie set by the API on login.
-    const match = document.cookie.match(/(?:^|;\s*)seenoevil_csrf=([^;]+)/);
-    if (match) {
+    const token = getCsrfToken();
+    if (token) {
       config.headers = config.headers ?? {};
-      (config.headers as Record<string, string>)["x-csrf-token"] = decodeURIComponent(match[1]);
+      (config.headers as Record<string, string>)["x-csrf-token"] = token;
     }
   }
   return config;

@@ -90,10 +90,20 @@ def _purge_expired_states(session: Session) -> None:
 
 
 def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = None) -> dict:
-    """Fetch and cache the OIDC discovery document."""
+    """Fetch and cache the OIDC discovery document (TTL 1h)."""
     cached = _load(session, _DISCOVERY_KEY)
     if cached and cached.get("issuer") == cfg.issuer:
-        return cached
+        # 3600s TTL — provider rotation picked up without restart.
+        fetched_at = int(cached.get("fetched_at", 0))
+        if fetched_at and int(time.time()) - fetched_at < 3600:
+            return cached
+        if not fetched_at:
+            # legacy cache without timestamp — treat as fresh for 1h from now
+            # to avoid hammering, then refetch next time.
+            cached["fetched_at"] = int(time.time())
+            _store(session, _DISCOVERY_KEY, cached)
+            session.flush()
+            return cached
     if not cfg.issuer:
         raise ValueError("oidc.issuer not configured")
     url = cfg.issuer.rstrip("/") + _DISCOVERY_PATH
@@ -107,6 +117,8 @@ def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = No
     finally:
         if own:
             client.close()
+    doc["fetched_at"] = int(time.time())
+    doc["issuer"] = cfg.issuer
     _store(session, _DISCOVERY_KEY, doc)
     session.flush()
     return doc
@@ -182,7 +194,7 @@ def finish_flow(
         raise ValueError("state expired")
     verifier = saved["verifier"]
     redirect_url = saved["redirect_url"]
-    _delete(session, _STATE_PREFIX + state)
+    saved_nonce = saved.get("nonce")
 
     doc = discover(cfg, session, client=client)
     token_endpoint = doc.get("token_endpoint")
@@ -209,6 +221,29 @@ def finish_flow(
         access_token = tokens.get("access_token")
         if not access_token:
             raise ValueError("oidc token response missing access_token")
+        # Verify nonce if id_token present and we issued one.
+        id_token = tokens.get("id_token")
+        if saved_nonce and id_token:
+            try:
+                # id_token is JWT: header.payload.sig — verify nonce in payload without
+                # signature verification (provider signature checked by provider libs
+                # when needed; we at least ensure nonce binding).
+                payload_b64 = id_token.split(".")[1]
+                # pad base64
+                payload_b64 += "=" * (-len(payload_b64) % 4)
+                payload_json = base64.urlsafe_b64decode(payload_b64.encode()).decode()
+                import json as _json
+
+                payload = _json.loads(payload_json)
+                token_nonce = payload.get("nonce")
+                if token_nonce is not None and token_nonce != saved_nonce:
+                    raise ValueError("oidc nonce mismatch")
+            except (ValueError, IndexError, base64.binascii.Error, Exception) as exc:
+                # Nonce mismatch is security-relevant; other decode errors are logged
+                # but don't block userinfo flow if provider omits nonce.
+                if isinstance(exc, ValueError) and "nonce mismatch" in str(exc):
+                    raise
+                log.debug("oidc id_token nonce check skipped: %s", exc)
         ui = client.get(
             userinfo_endpoint,
             headers={"Authorization": f"Bearer {access_token}"},
@@ -225,4 +260,8 @@ def finish_flow(
     if cfg.allowed_emails and email.lower() not in {e.lower() for e in cfg.allowed_emails}:
         log.warning("oidc sign-in rejected: %s not in allowed_emails", email)
         raise PermissionError("email not permitted")
+    # Delete state only after successful verification — transient token/userinfo
+    # failures keep state for retry within TTL.
+    _delete(session, _STATE_PREFIX + state)
+    session.flush()
     return FinishedFlow(email=str(email))
