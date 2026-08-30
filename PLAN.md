@@ -30,6 +30,7 @@
 | M8 | Multi-user RBAC, OIDC, audit HMAC tamper detection, retention cleanup | ✅ done |
 | M9 | Backup/restore + Litestream replication profiles, observability dashboards, docs polish | 🟡 partial — `backup` / `litestream` compose profiles ship commented (opt-in) |
 | M10 | Whole-codebase review hardening (P0/P1/P2) — bypass/identity/quota/resource/contract fixes, Podman-native | ✅ done — see review findings G1-G6 (59 items). Transparent-mode docs + podman compose validated. |
+| M11 | Whole-codebase review round 2 — XFF trust, token bootstrap, CSRF, peekBody, backup symlink, quarantine/audit/OIDC/panic/scanner/CA/limitFor/quota/SVG/docs hardening (19 items) | ✅ done |
 
 ## Open sub-items (tracked)
 
@@ -37,3 +38,4 @@
 - [ ] Uncomment + validate the `backup` / `litestream` compose profiles.
 - [ ] `vpn-wg` (wg-easy) profile: decide and document; Tailscale profile ships enabled.
 - [x] Whole-codebase review hardening — all P0/P1/P2 findings triaged and fixed (G1-G6). Remaining P3 are residual/advisory and tracked in audit backlog.
+- [x] Whole-codebase review round 2 — 19 findings (6 P1, 9 P2, 4 P3) fixed: XFF, token, CSRF, peekBody, backup, quarantine RBAC, audit, cleanup, CA cache, OIDC, panic HMAC, scanner, docs.

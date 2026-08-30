@@ -13,8 +13,9 @@ from ..models import AuditDecision
 from ..schemas import AuditOut
 
 
-def make_router(get_session_dep, require_user) -> APIRouter:
+def make_router(get_session_dep, require_user, require_admin=None) -> APIRouter:  # type: ignore[no-untyped-def]
     r = APIRouter(prefix="/v1/audit", tags=["audit"])
+    # Back-compat: older app.py passed only (dep,user); new code passes admin too.
 
     @r.get("", response_model=list[AuditOut], dependencies=[Depends(require_user)])
     def list_audit(
@@ -57,6 +58,7 @@ def make_router(get_session_dep, require_user) -> APIRouter:
         "",
         status_code=status.HTTP_204_NO_CONTENT,
         response_class=Response,
+        dependencies=[Depends(require_user)],
     )
     def clear_audit(
         session: Session = Depends(get_session_dep),

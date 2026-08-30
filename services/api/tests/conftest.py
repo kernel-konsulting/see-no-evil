@@ -33,12 +33,27 @@ class AuthedClient(TestClient):
     /v1/quota/heartbeat with `Authorization: Bearer <token>`; tests that
     exercise those endpoints get the header for free, and tests of the
     unauthenticated paths can pass headers={"Authorization": ""} to opt out.
+
+    Also attaches the double-submit CSRF header when a CSRF cookie is present,
+    mirroring the UI's axios interceptor so CSRF enforcement does not break
+    tests.
     """
 
     def request(self, method: str, url: str, **kwargs):
         headers = kwargs.get("headers") or {}
         kwargs["headers"] = headers
         headers.setdefault("Authorization", f"Bearer {PROXY_TOKEN}")
+        # Mirror UI CSRF handling: copy `seenoevil_csrf` cookie to header.
+        try:
+            csrf = None
+            for cookie in self.cookies.jar:  # type: ignore[attr-defined]
+                if cookie.name == "seenoevil_csrf":
+                    csrf = cookie.value
+                    break
+            if csrf and "x-csrf-token" not in {k.lower() for k in headers}:
+                headers["x-csrf-token"] = csrf
+        except Exception:
+            pass
         return super().request(method, url, **kwargs)
 
 

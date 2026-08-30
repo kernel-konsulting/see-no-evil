@@ -102,12 +102,24 @@ def _confirm(msg: str, default: bool = True) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _generate_token() -> str:
+    import secrets as _secrets
+
+    return _secrets.token_hex(32)
+
+
 def _build_config(
     data_dir: str,
     admin_email: str,
     dns_upstream: str,
     hostname: str,
+    proxy_token: str | None = None,
+    scanner_token: str | None = None,
 ) -> dict:
+    if not proxy_token:
+        proxy_token = os.environ.get("SEENOEVIL_PROXY_TOKEN") or _generate_token()
+    if not scanner_token:
+        scanner_token = os.environ.get("SCANNER_API_TOKEN") or _generate_token()
     return {
         "pod": {
             "hostname": hostname,
@@ -122,6 +134,12 @@ def _build_config(
         },
         "dns": {
             "upstreams": UPSTREAM_PRESETS[dns_upstream],
+        },
+        "proxy": {
+            "api_token": proxy_token,
+        },
+        "scanner": {
+            "api_token": scanner_token,
         },
         "profiles": [
             {
@@ -236,6 +254,17 @@ def main() -> None:
         default="cloudflare-family",
     )
 
+    # Proxy/scanner tokens — generate if not supplied via env so a fresh
+    # install never bricks filtering due to empty token + fail_closed:true.
+    proxy_token = os.environ.get("SEENOEVIL_PROXY_TOKEN") or ""
+    scanner_token = os.environ.get("SCANNER_API_TOKEN") or ""
+    if not proxy_token:
+        proxy_token = _generate_token()
+        print(f"  Generated proxy token: {proxy_token[:8]}… (written to config.yaml)")
+        print("  Also set SEENOEVIL_PROXY_TOKEN env for compose deployments.")
+    if not scanner_token:
+        scanner_token = _generate_token()
+
     # ----------------------------------------------------------------
     # 3. Write config.yaml
     # ----------------------------------------------------------------
@@ -246,6 +275,8 @@ def main() -> None:
             admin_email=admin_email,
             dns_upstream=dns_upstream,
             hostname=hostname,
+            proxy_token=proxy_token,
+            scanner_token=scanner_token,
         )
         with config_path.open("w") as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)

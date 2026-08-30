@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from .auth import (
     current_user_factory,
     require_admin_factory,
+    require_csrf,
     require_user_factory,
     set_admin_password,
 )
@@ -159,6 +160,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     require_admin = require_admin_factory(db_dep)
     require_user = require_user_factory(db_dep)
     current_user = current_user_factory(db_dep)
+
+    # Global CSRF enforcement for state-changing methods (double-submit).
+    @app.middleware("http")
+    async def _csrf_middleware(request, call_next):  # type: ignore[no-untyped-def]
+        # Exempt safe methods and unauthenticated setup/login paths.
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            try:
+                require_csrf(request)
+            except Exception as exc:  # noqa: BLE001
+                from fastapi.responses import JSONResponse
+
+                # Let FastAPI's HTTPException handling produce proper JSON.
+                if hasattr(exc, "status_code"):
+                    return JSONResponse(
+                        status_code=exc.status_code,  # type: ignore[attr-defined]
+                        content={"detail": getattr(exc, "detail", str(exc))},
+                    )
+                raise
+        return await call_next(request)
 
     def get_config_dep() -> AppConfig:
         return config

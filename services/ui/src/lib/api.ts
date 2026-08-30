@@ -68,17 +68,40 @@ export const http = axios.create({
   withCredentials: true,
 });
 
-// On 401 redirect to /login.
+// On 401 redirect to /login (except for the bootstrap /auth/me probe).
 http.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
+      const url: string = err.config?.url ?? "";
+      // The AuthProvider probes /auth/me on mount; that 401 is handled
+      // locally (shows login screen) and must not trigger a hard reload.
+      if (url.includes("/auth/me")) {
+        return Promise.reject(err);
+      }
       clearStoredAuth();
-      window.location.href = "/login";
+      // Use history navigation when possible to avoid losing error context.
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(err);
   },
 );
+
+// Attach double-submit CSRF header for mutating requests.
+http.interceptors.request.use((config) => {
+  const method = (config.method ?? "get").toLowerCase();
+  if (["post", "put", "patch", "delete"].includes(method)) {
+    // Read CSRF cookie set by the API on login.
+    const match = document.cookie.match(/(?:^|;\s*)seenoevil_csrf=([^;]+)/);
+    if (match) {
+      config.headers = config.headers ?? {};
+      (config.headers as Record<string, string>)["x-csrf-token"] = decodeURIComponent(match[1]);
+    }
+  }
+  return config;
+});
 
 // ---------------------------------------------------------------------------
 // Auth

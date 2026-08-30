@@ -34,7 +34,7 @@ from .config import AppConfig
 
 Decision = Literal["allow", "block"]
 
-_NON_BLOCKING_CLASSIFIER_LABELS = {"neutral", "drawing", "drawings"}
+_NON_BLOCKING_CLASSIFIER_LABELS = {"neutral", "drawing", "drawings", "safe"}
 
 
 @dataclass(frozen=True)

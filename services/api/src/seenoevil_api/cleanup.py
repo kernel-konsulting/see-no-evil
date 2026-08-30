@@ -29,6 +29,7 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
     """
     if retention_days <= 0:
         return {"audit": 0, "quarantine": 0}
+    # Use naive UTC cutoff consistently with DB storage (SQLite stores naive).
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
     try:
         audit_deleted = (

@@ -478,9 +478,18 @@ def test_quarantine_viewer_forbidden(client: TestClient) -> None:
     )
     assert r.status_code == 200, r.text
 
-    assert client.get("/v1/quarantine").status_code == 403
-    assert client.get("/v1/quarantine/1").status_code == 403
-    assert client.post("/v1/quarantine/1/flag", json={"note": "maybe safe"}).status_code == 403
+    # Viewers can now list and flag quarantine (read + flag) but cannot mutate.
+    assert client.get("/v1/quarantine").status_code == 200
+    assert client.get("/v1/quarantine/1").status_code in (200, 404)
+    # Flag should succeed (or 404 if no item) — never 403.
+    assert client.post("/v1/quarantine/1/flag", json={"note": "maybe safe"}).status_code in (
+        200,
+        404,
+    )
+    # But allow/deny/delete still admin-only.
+    assert client.post("/v1/quarantine/1/allow").status_code == 403
+    assert client.post("/v1/quarantine/1/deny").status_code == 403
+    assert client.delete("/v1/quarantine/1").status_code == 403
 
 
 def test_quarantine_delete(admin_client: TestClient) -> None:

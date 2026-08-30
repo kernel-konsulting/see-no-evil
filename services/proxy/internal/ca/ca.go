@@ -29,6 +29,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -311,14 +312,21 @@ func NewLeafCache(ca *KeyPair) *LeafCache {
 }
 
 // TLSConfig returns a *tls.Config presenting a leaf certificate for the given
-// SNI host, minting one on first use.
+// SNI host, minting one on first use. Host may include :port which is stripped
+// for caching so example.com:443 and example.com share the same leaf.
 func (lc *LeafCache) TLSConfig(host string) *tls.Config {
+	// Canonicalize for cache key: strip port, lower-case.
+	cacheKey := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		cacheKey = h
+	}
+	cacheKey = strings.ToLower(strings.TrimSuffix(cacheKey, "."))
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 
-	if e, ok := lc.m[host]; ok {
+	if e, ok := lc.m[cacheKey]; ok {
 		e.lastUsed = time.Now()
-		lc.m[host] = e
+		lc.m[cacheKey] = e
 		return e.cfg
 	}
 
@@ -335,7 +343,7 @@ func (lc *LeafCache) TLSConfig(host string) *tls.Config {
 	if len(lc.m) >= leafCacheMaxEntries {
 		lc.evictOldestLocked()
 	}
-	lc.m[host] = leafEntry{cfg: cfg, lastUsed: time.Now()}
+	lc.m[cacheKey] = leafEntry{cfg: cfg, lastUsed: time.Now()}
 	return cfg
 }
 

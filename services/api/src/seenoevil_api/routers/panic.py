@@ -34,18 +34,21 @@ def _to_status(state: panic.PanicState) -> PanicStatus:
 
 
 def _audit(session: Session, *, action: str, who: str | None, reason: str) -> None:
-    session.add(
-        AuditDecision(
-            ts=datetime.now(UTC).replace(tzinfo=None),
-            device_id=None,
-            profile_id=None,
-            url=f"seenoevil://panic/{action}",
-            content_type=None,
-            decision="allow" if action == "enable" else "block",
-            reason=f"panic_{action}:{reason or ''}"[:128],
-            classifier_scores={"set_by": who or ""},
-        )
+    from .. import audit_sig
+
+    row = AuditDecision(
+        ts=datetime.now(UTC).replace(tzinfo=None),
+        device_id=None,
+        profile_id=None,
+        url=f"seenoevil://panic/{action}",
+        content_type=None,
+        decision="allow" if action == "enable" else "block",
+        reason=f"panic_{action}:{reason or ''}"[:128],
+        classifier_scores={"set_by": who or ""},
     )
+    session.add(row)
+    session.flush()
+    audit_sig.sign_row(session, row)
 
 
 def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
