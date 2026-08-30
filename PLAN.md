@@ -29,9 +29,11 @@
 | M7 | Device auto-discovery (scanner + proxy-driven), vendor enrichment, synthetic MACs from IP | ✅ done |
 | M8 | Multi-user RBAC, OIDC, audit HMAC tamper detection, retention cleanup | ✅ done |
 | M9 | Backup/restore + Litestream replication profiles, observability dashboards, docs polish | 🟡 partial — `backup` / `litestream` compose profiles ship commented (opt-in) |
+| M10 | Whole-codebase review hardening (P0/P1/P2) — bypass/identity/quota/resource/contract fixes, Podman-native | ✅ done — see review findings G1-G6 (59 items). Transparent-mode docs + podman compose validated. |
 
 ## Open sub-items (tracked)
 
 - [ ] Wire OPA (`policies/seenoevil.rego`) into `/v1/decide`, or delete the rego (keep one policy engine).
 - [ ] Uncomment + validate the `backup` / `litestream` compose profiles.
 - [ ] `vpn-wg` (wg-easy) profile: decide and document; Tailscale profile ships enabled.
+- [x] Whole-codebase review hardening — all P0/P1/P2 findings triaged and fixed (G1-G6). Remaining P3 are residual/advisory and tracked in audit backlog.

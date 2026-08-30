@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,8 +15,14 @@ def make_router(get_session_dep, require_admin) -> APIRouter:
     r = APIRouter(prefix="/v1/profiles", tags=["profiles"])
 
     @r.get("", response_model=list[ProfileOut], dependencies=[Depends(require_admin)])
-    def list_profiles(session: Session = Depends(get_session_dep)) -> list[Profile]:
-        return list(session.scalars(select(Profile).order_by(Profile.id)))
+    def list_profiles(
+        session: Session = Depends(get_session_dep),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[Profile]:
+        return list(
+            session.scalars(select(Profile).order_by(Profile.id).offset(offset).limit(limit))
+        )
 
     @r.get("/{profile_id}", response_model=ProfileOut, dependencies=[Depends(require_admin)])
     def get_profile(profile_id: int, session: Session = Depends(get_session_dep)) -> Profile:
@@ -57,7 +63,11 @@ def make_router(get_session_dep, require_admin) -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "profile not found")
         for key, value in body.model_dump(exclude_unset=True).items():
             setattr(obj, key, value)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError as exc:
+            session.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, "profile name already exists") from exc
         session.refresh(obj)
         return obj
 

@@ -51,6 +51,7 @@ export interface AuditEntry {
   reason: string;
   classifier_scores: Record<string, unknown>;
   thumbnail_b64: string | null;
+  signature_valid: boolean | null;
 }
 
 export interface HealthResponse {

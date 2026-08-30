@@ -12,6 +12,7 @@ this module needing to know every detail.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from functools import lru_cache
@@ -20,6 +21,8 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+log = logging.getLogger("seenoevil_api.config")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,6 +155,7 @@ class ProfileConfig(_Base):
     quota_minutes_per_day: int = 0
     allow: AllowDeny = Field(default_factory=AllowDeny)
     deny: AllowDeny = Field(default_factory=AllowDeny)
+    enforce_allowlist: bool = False
     notify_on_block: bool = False
 
     @field_validator("name")
@@ -245,10 +249,22 @@ class ObservabilityConfig(_Base):
 class ScannerConfig(_Base):
     enabled: bool = False
     cidr: str = "192.168.1.0/24"
+    # Plural alias accepted for compatibility with config.example.yaml (`cidrs:`).
+    cidrs: list[str] | None = None
     interval: str = "1h"
     # Shared secret the scanner presents as `Authorization: Bearer <token>`
     # on /v1/devices/discover. Falls back to the SCANNER_API_TOKEN env var.
     api_token: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_cidrs(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("cidrs") and not data.get("cidr"):
+            cidrs = data.get("cidrs")
+            if isinstance(cidrs, list) and cidrs:
+                data = dict(data)
+                data["cidr"] = str(cidrs[0])
+        return data
 
 
 class NotificationsConfig(_Base):
@@ -358,13 +374,21 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
     if path is None:
         env_path = os.environ.get(CONFIG_ENV_VAR)
         if not env_path:
-            return AppConfig()
+            cfg = AppConfig()
+            if not cfg.proxy.api_token and not os.environ.get("SEENOEVIL_PROXY_TOKEN"):
+                log.warning("proxy.api_token not configured — /v1/decide will 503")
+            return cfg
         path = env_path
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"config file not found: {p}")
     raw: dict[str, Any] = yaml.safe_load(p.read_text()) or {}
-    return AppConfig.model_validate(raw)
+    cfg = AppConfig.model_validate(raw)
+    if not cfg.proxy.api_token and not os.environ.get("SEENOEVIL_PROXY_TOKEN"):
+        log.warning("proxy.api_token not configured — /v1/decide will 503")
+    if not cfg.scanner.api_token and not os.environ.get("SCANNER_API_TOKEN"):
+        log.warning("scanner.api_token not configured — discover requires admin")
+    return cfg
 
 
 @lru_cache(maxsize=1)

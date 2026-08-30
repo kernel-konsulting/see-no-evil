@@ -73,20 +73,37 @@ func enforceYouTubeRestricted(r *http.Request) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+func bareHost(host string) string {
+	// Strip port and lowercase.
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return strings.ToLower(host)
+}
+
+func hostSuffixMatch(host, suffix string) bool {
+	h := bareHost(host)
+	s := strings.ToLower(suffix)
+	return h == s || strings.HasSuffix(h, "."+s)
+}
+
 func isGoogle(host string) bool {
-	return strings.Contains(host, "google.") || strings.Contains(host, "googleapis.com")
+	return hostSuffixMatch(host, "google.com") || hostSuffixMatch(host, "googleapis.com") ||
+		strings.HasSuffix(bareHost(host), ".googleusercontent.com") ||
+		hostSuffixMatch(host, "gstatic.com")
 }
 
 func isBing(host string) bool {
-	return strings.Contains(host, "bing.com")
+	return hostSuffixMatch(host, "bing.com")
 }
 
 func isDDG(host string) bool {
-	return strings.Contains(host, "duckduckgo.com")
+	return hostSuffixMatch(host, "duckduckgo.com")
 }
 
 func isYouTube(host string) bool {
-	return strings.Contains(host, "youtube.com") || strings.Contains(host, "youtu.be")
+	return hostSuffixMatch(host, "youtube.com") || hostSuffixMatch(host, "youtu.be") ||
+		hostSuffixMatch(host, "youtube-nocookie.com") || hostSuffixMatch(host, "youtube-ui.l.google.com")
 }
 
 // setCookie writes name=value into the request's Cookie header, removing any

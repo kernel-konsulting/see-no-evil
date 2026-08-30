@@ -117,6 +117,7 @@ type Handler struct {
 	blockedYouTubeMu     sync.Mutex
 	blockedYouTubeVideos map[string]blockedYouTubeVideo
 	transport            *http.Transport // shared upstream transport (conn reuse)
+	limiter              *rateLimiter
 }
 
 type blockedYouTubeVideo struct {
@@ -125,17 +126,79 @@ type blockedYouTubeVideo struct {
 }
 
 const blockedYouTubeTTL = 6 * time.Hour
+const maxBlockedYouTube = 10000
+
+// hard caps mirror config hard caps — defense in depth even if config is bypassed.
+const (
+	hardMaxImage = 20 << 20
+	hardMaxText  = 5 << 20
+	hardMaxVideo = 500 << 20
+)
+
+// ---------------------------------------------------------------------------
+// Rate limiter (data-plane, per-IP token bucket stub)
+// ---------------------------------------------------------------------------
+
+type rateLimiter struct {
+	mu        sync.Mutex
+	buckets   map[string]*rateBucket
+	limit     int
+	window    time.Duration
+	lastSweep time.Time
+}
+
+type rateBucket struct {
+	count int
+	reset time.Time
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	return &rateLimiter{
+		buckets: make(map[string]*rateBucket),
+		limit:   limit,
+		window:  window,
+	}
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	if ip == "" {
+		return true
+	}
+	now := time.Now()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	// periodic sweep of expired buckets to bound memory (every ~5m)
+	if now.Sub(rl.lastSweep) > 5*time.Minute {
+		for k, b := range rl.buckets {
+			if now.After(b.reset) {
+				delete(rl.buckets, k)
+			}
+		}
+		rl.lastSweep = now
+	}
+	b, ok := rl.buckets[ip]
+	if !ok || now.After(b.reset) {
+		rl.buckets[ip] = &rateBucket{count: 1, reset: now.Add(rl.window)}
+		return true
+	}
+	if b.count >= rl.limit {
+		return false
+	}
+	b.count++
+	return true
+}
 
 func NewHandler(cfg Config) *Handler {
 	bypass := make(map[string]bool, len(cfg.BypassDomains))
 	for _, d := range cfg.BypassDomains {
 		bypass[strings.ToLower(strings.TrimPrefix(d, "*."))] = true
 	}
-	return &Handler{
+	h := &Handler{
 		cfg:                  cfg,
 		leafCache:            ca.NewLeafCache(cfg.CA),
 		bypass:               bypass,
 		blockedYouTubeVideos: make(map[string]blockedYouTubeVideo),
+		limiter:              newRateLimiter(100, time.Second),
 		transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -156,9 +219,42 @@ func NewHandler(cfg Config) *Handler {
 			YouTubeRestricted: cfg.SafeSearch.YouTubeRestricted,
 		},
 	}
+	go h.sweepBlockedYouTubeLoop()
+	return h
+}
+
+func (h *Handler) sweepBlockedYouTubeLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.cleanupBlockedYouTube()
+	}
+}
+
+func (h *Handler) cleanupBlockedYouTube() {
+	now := time.Now()
+	h.blockedYouTubeMu.Lock()
+	defer h.blockedYouTubeMu.Unlock()
+	for id, v := range h.blockedYouTubeVideos {
+		if now.After(v.expiresAt) {
+			delete(h.blockedYouTubeVideos, id)
+		}
+	}
+	// hard bound: if still over capacity evict arbitrary oldest entries
+	for len(h.blockedYouTubeVideos) > maxBlockedYouTube {
+		for k := range h.blockedYouTubeVideos {
+			delete(h.blockedYouTubeVideos, k)
+			break
+		}
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if h.limiter != nil && !h.limiter.allow(ip) {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		return
+	}
 	if r.Method == http.MethodConnect {
 		h.handleConnect(w, r)
 		return
@@ -197,10 +293,12 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Wrap with our TLS using a leaf cert for this host.
 	tlsConn := tls.Server(clientConn, h.leafCache.TLSConfig(host))
+	_ = clientConn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		slog.Debug("TLS handshake failed", "host", host, "err", err)
 		return
 	}
+	_ = clientConn.SetDeadline(time.Time{})
 	defer func() { _ = tlsConn.Close() }()
 
 	// Re-use the plain HTTP handler on the decrypted connection.
@@ -212,6 +310,8 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 			h.handlePlainHTTP(w, innerR)
 		}),
 		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 	_ = httpSrv.Serve(newSingleConnListener(tlsConn))
@@ -281,6 +381,18 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	respCT := resp.Header.Get("Content-Type")
 	if shouldInspect(respCT) {
 		respBodySnap, resp.Body = peekBody(resp.Body, h.limitFor(respCT))
+	} else {
+		// Content-Type spoofing defence: sniff generic types with bounded buffer
+		// to catch NSFW images served as application/octet-stream etc. (#3).
+		sniffSnap, newBody := peekBody(resp.Body, hardMaxImage)
+		if shouldInspectWithBody(respCT, sniffSnap) {
+			respBodySnap = sniffSnap
+			resp.Body = newBody
+		} else {
+			// Not inspectable even after sniff — keep body but discard snap to
+			// avoid holding large generic bodies in memory for audit.
+			resp.Body = newBody
+		}
 	}
 
 	// Classify and decide. May return a replacement body when text-strip mode
@@ -356,9 +468,11 @@ func (h *Handler) decide(
 		rt.Inspect.URL = true
 	}
 
-	// Image classification.
-	if rt.Inspect.Image && isImage(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
-		result, err := h.cfg.Classifiers.ClassifyImage(ctx, respBody, r.Header.Get("X-Request-Id"))
+	// Image classification (includes sniff fallback for spoofed CT).
+	if rt.Inspect.Image && effectiveIsImage(ct, respBody) && len(respBody) > 0 && h.cfg.Classifiers != nil {
+		ictx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		result, err := h.cfg.Classifiers.ClassifyImage(ictx, respBody, r.Header.Get("X-Request-Id"))
+		cancel()
 		if err != nil {
 			slog.Warn("image classifier error", "err", err)
 			classifierErrors.WithLabelValues("image").Inc()
@@ -394,7 +508,9 @@ func (h *Handler) decide(
 	// Video sampling: stream the buffered video body to the video-sampler
 	// service which extracts evenly-spaced frames and classifies each.
 	if rt.Inspect.Video && isVideo(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil && h.cfg.Classifiers.Video != nil {
-		result, err := h.cfg.Classifiers.SampleVideo(ctx, respBody, 0, r.Header.Get("X-Request-Id"))
+		vctx, vcancel := context.WithTimeout(ctx, 30*time.Second)
+		result, err := h.cfg.Classifiers.SampleVideo(vctx, respBody, 0, r.Header.Get("X-Request-Id"))
+		vcancel()
 		if err != nil {
 			slog.Warn("video sampler error", "err", err)
 			classifierErrors.WithLabelValues("video").Inc()
@@ -444,8 +560,8 @@ func (h *Handler) decide(
 
 	// Text classification (response body) using extracted natural-language
 	// segments only — feeding raw HTML/JSON to the classifier produces
-	// constant false positives on markup tokens.
-	if h.textMode() != "off" && rt.Inspect.Text && !skipTextClassification(r) && textextract.IsSupported(ct) && len(respBody) > 0 && h.cfg.Classifiers != nil {
+	// constant false positives on markup tokens. Falls back to sniff for generic CT.
+	if h.textMode() != "off" && rt.Inspect.Text && !skipTextClassification(r) && effectiveIsText(ct, respBody) && len(respBody) > 0 && h.cfg.Classifiers != nil {
 		action, reason, segScores, replaced := h.inspectText(ctx, r, ct, respBody, rt.Text.NSFWThreshold, h.cfg.FailClosed)
 		for k, v := range segScores {
 			scores["text:"+k] = v
@@ -460,13 +576,15 @@ func (h *Handler) decide(
 
 	// Policy API for domain/schedule/quota checks.
 	if h.cfg.Policy != nil {
-		result, err := h.cfg.Policy.Decide(ctx, policy.DecideRequest{
+		pctx, pcancel := context.WithTimeout(ctx, 5*time.Second)
+		result, err := h.cfg.Policy.Decide(pctx, policy.DecideRequest{
 			URL:              r.URL.String(),
 			ClientIP:         clientIP(r),
 			ContentType:      ct,
 			ClassifierScores: scores,
 			ThumbnailB64:     thumb,
 		})
+		pcancel()
 		if err != nil {
 			slog.Warn("policy API error", "err", err)
 			if h.cfg.FailClosed {
@@ -590,6 +708,11 @@ func (h *Handler) inspectText(
 	if len(segments) == 0 {
 		return "allow", "", nil, nil
 	}
+	// Cap sequential RPCs: truncate to first 16 segments to bound latency
+	// and protect classifier capacity.
+	if len(segments) > 16 {
+		segments = segments[:16]
+	}
 
 	threshold := h.textThreshold(runtimeThreshold)
 	maxScores := map[string]float32{}
@@ -598,7 +721,9 @@ func (h *Handler) inspectText(
 	requestID := r.Header.Get("X-Request-Id")
 
 	for _, seg := range segments {
-		res, err := h.cfg.Classifiers.ClassifyText(ctx, seg.Text, requestID)
+		tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		res, err := h.cfg.Classifiers.ClassifyText(tctx, seg.Text, requestID)
+		cancel()
 		if err != nil {
 			slog.Warn("text classifier error", "err", err, "path", seg.Path)
 			classifierErrors.WithLabelValues("text").Inc()
@@ -664,6 +789,12 @@ func (h *Handler) rememberBlockedYouTubeVideo(r *http.Request, body []byte, reas
 	}
 
 	h.blockedYouTubeMu.Lock()
+	if len(h.blockedYouTubeVideos) >= maxBlockedYouTube {
+		for k := range h.blockedYouTubeVideos {
+			delete(h.blockedYouTubeVideos, k)
+			break
+		}
+	}
 	h.blockedYouTubeVideos[id] = blockedYouTubeVideo{
 		reason:    nonEmptyReason(reason, "classifier:image"),
 		expiresAt: time.Now().Add(blockedYouTubeTTL),
@@ -848,11 +979,16 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 		done <- struct{}{}
 	}
 	go cp(upstream, clientConn)
 	go cp(clientConn, upstream)
-	<-done
+	for i := 0; i < 2; i++ {
+		<-done
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -869,12 +1005,25 @@ func (h *Handler) roundTrip(r *http.Request) (*http.Response, error) {
 	return h.transport.RoundTrip(r)
 }
 
-func (h *Handler) refetchFullVideoIfNeeded(r *http.Request, resp *http.Response) *http.Response {
+func (h *Handler) refetchFullMediaIfNeeded(r *http.Request, resp *http.Response) *http.Response {
 	if r.Method != http.MethodGet || r.Header.Get("Range") == "" {
 		return resp
 	}
-	if resp.StatusCode != http.StatusPartialContent || !isVideo(resp.Header.Get("Content-Type")) {
+	ct := resp.Header.Get("Content-Type")
+	if resp.StatusCode != http.StatusPartialContent || (!isVideo(ct) && !isImage(ct)) {
 		return resp
+	}
+	// Guard: don't refetch if Content-Range indicates huge file beyond hard caps
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		// e.g. "bytes 0-1023/500000000" -> check size
+		if idx := strings.LastIndex(cr, "/"); idx >= 0 {
+			if sizeStr := strings.TrimSpace(cr[idx+1:]); sizeStr != "*" {
+				if sz, err := parsePositiveInt(sizeStr); err == nil && sz > 500<<20 {
+					slog.Info("media range refetch skipped — file too large", "url", r.URL.String(), "size", sz)
+					return resp
+				}
+			}
+		}
 	}
 
 	retry := r.Clone(r.Context())
@@ -884,20 +1033,44 @@ func (h *Handler) refetchFullVideoIfNeeded(r *http.Request, resp *http.Response)
 	retry.Header.Del("If-None-Match")
 	retry.Header.Del("If-Modified-Since")
 
+	// Add timeout to avoid hanging refetch
+	rctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	retry = retry.WithContext(rctx)
+
 	fullResp, err := h.roundTrip(retry)
 	if err != nil {
-		slog.Warn("video full-body refetch failed", "err", err, "url", r.URL.String())
+		slog.Warn("media full-body refetch failed", "err", err, "url", r.URL.String())
 		return resp
 	}
-	if !isVideo(fullResp.Header.Get("Content-Type")) {
-		slog.Warn("video full-body refetch returned non-video", "url", r.URL.String(), "content_type", fullResp.Header.Get("Content-Type"))
+	fullCT := fullResp.Header.Get("Content-Type")
+	if !isVideo(fullCT) && !isImage(fullCT) {
+		slog.Warn("media full-body refetch returned non-media", "url", r.URL.String(), "content_type", fullCT)
 		_ = fullResp.Body.Close()
 		return resp
 	}
 
 	_ = resp.Body.Close()
-	slog.Info("video range refetched for inspection", "url", r.URL.String(), "status", fullResp.StatusCode)
+	slog.Info("media range refetched for inspection", "url", r.URL.String(), "status", fullResp.StatusCode, "content_type", fullCT)
 	return fullResp
+}
+
+func (h *Handler) refetchFullVideoIfNeeded(r *http.Request, resp *http.Response) *http.Response {
+	return h.refetchFullMediaIfNeeded(r, resp)
+}
+
+func parsePositiveInt(s string) (int64, error) {
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("not numeric")
+		}
+		n = n*10 + int64(c-'0')
+		if n > 1<<60 {
+			return n, nil
+		}
+	}
+	return n, nil
 }
 
 var hopHeaders = []string{
@@ -944,6 +1117,9 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	if limit <= 0 {
 		limit = 10 << 20
 	}
+	if limit > hardMaxVideo {
+		limit = hardMaxVideo
+	}
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
 		return nil, rc
@@ -952,17 +1128,34 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 }
 
 // limitFor returns the per-content-type byte cap. Falls back to the legacy
-// MaxInspectBytes when a per-type cap isn't configured.
+// MaxInspectBytes when a per-type cap isn't configured. Caps at hard max
+// even when configured to unlimited.
 func (h *Handler) limitFor(ct string) int64 {
 	switch {
 	case isImage(ct) && h.cfg.MaxImageBytes > 0:
-		return h.cfg.MaxImageBytes
+		v := h.cfg.MaxImageBytes
+		if v > hardMaxImage {
+			return hardMaxImage
+		}
+		return v
 	case isVideo(ct) && h.cfg.MaxVideoBytes > 0:
-		return h.cfg.MaxVideoBytes
+		v := h.cfg.MaxVideoBytes
+		if v > hardMaxVideo {
+			return hardMaxVideo
+		}
+		return v
 	case textextract.IsSupported(ct) && h.cfg.MaxTextBytes > 0:
-		return h.cfg.MaxTextBytes
+		v := h.cfg.MaxTextBytes
+		if v > hardMaxText {
+			return hardMaxText
+		}
+		return v
 	}
-	return h.cfg.MaxInspectBytes
+	v := h.cfg.MaxInspectBytes
+	if v > hardMaxVideo {
+		return hardMaxVideo
+	}
+	return v
 }
 
 // ---------------------------------------------------------------------------
@@ -973,12 +1166,98 @@ func shouldInspect(ct string) bool {
 	return isImage(ct) || isVideo(ct) || textextract.IsSupported(ct)
 }
 
+// shouldInspectWithBody falls back to magic-byte sniffing when the server
+// lies about Content-Type (e.g. NSFW JPEG served as application/octet-stream).
+// This defends the bypass where attacker sets generic CT to skip classifiers (#3).
+func shouldInspectWithBody(ct string, body []byte) bool {
+	if shouldInspect(ct) {
+		return true
+	}
+	// Generic / missing / misleading content-types -> sniff body.
+	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+	if ct == "" || ct == "application/octet-stream" || ct == "application/binary" ||
+		ct == "text/plain" || ct == "binary/octet-stream" {
+		if len(body) >= 2 {
+			// Image magic bytes: JPEG FF D8, PNG 89 50, GIF 47 49, WebP RIFF, BMP 42 4D
+			if body[0] == 0xFF && body[1] == 0xD8 {
+				return true
+			}
+			if len(body) >= 8 && body[0] == 0x89 && string(body[1:4]) == "PNG" {
+				return true
+			}
+			if len(body) >= 3 && string(body[0:3]) == "GIF" {
+				return true
+			}
+			if len(body) >= 4 && string(body[0:4]) == "RIFF" {
+				return true
+			}
+		}
+		// HTML sniff
+		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
+		if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
+			strings.HasPrefix(trimmed, "<head") {
+			return true
+		}
+		// JSON sniff
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeImage(body []byte) bool {
+	if len(body) >= 2 && body[0] == 0xFF && body[1] == 0xD8 {
+		return true
+	}
+	if len(body) >= 8 && body[0] == 0x89 && string(body[1:4]) == "PNG" {
+		return true
+	}
+	if len(body) >= 3 && string(body[0:3]) == "GIF" {
+		return true
+	}
+	if len(body) >= 8 && string(body[0:4]) == "RIFF" && string(body[8:12]) == "WEBP" {
+		return true
+	}
+	if len(body) >= 2 && body[0] == 0x42 && body[1] == 0x4D {
+		return true
+	}
+	return false
+}
+
+func effectiveIsImage(ct string, body []byte) bool {
+	if isImage(ct) {
+		return true
+	}
+	return len(body) > 0 && looksLikeImage(body)
+}
+
+func effectiveIsVideo(ct string, body []byte) bool {
+	if isVideo(ct) {
+		return true
+	}
+	// Video sniff is less reliable; only treat generic CT with large body as video if not image
+	return false
+}
+
+func effectiveIsText(ct string, body []byte) bool {
+	if textextract.IsSupported(ct) {
+		return true
+	}
+	if len(body) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
+	return strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
+		strings.HasPrefix(trimmed, "<head") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
 func isImage(ct string) bool {
-	return strings.HasPrefix(ct, "image/")
+	return strings.HasPrefix(strings.ToLower(strings.Split(ct, ";")[0]), "image/")
 }
 
 func isVideo(ct string) bool {
-	return strings.HasPrefix(ct, "video/")
+	return strings.HasPrefix(strings.ToLower(strings.Split(ct, ";")[0]), "video/")
 }
 
 // ---------------------------------------------------------------------------
@@ -993,14 +1272,15 @@ func (h *Handler) isBypass(host string) bool {
 	}
 	bare = strings.ToLower(bare)
 
-	// Exact match.
-	if h.bypass[bare] {
-		return true
-	}
-	// Wildcard: check each suffix level.
-	parts := strings.SplitN(bare, ".", 2)
-	if len(parts) == 2 && h.bypass[parts[1]] {
-		return true
+	for cur := bare; ; {
+		if h.bypass[cur] {
+			return true
+		}
+		idx := strings.IndexByte(cur, '.')
+		if idx < 0 {
+			break
+		}
+		cur = cur[idx+1:]
 	}
 	return false
 }

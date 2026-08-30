@@ -26,13 +26,28 @@ type Settings struct {
 		URL    bool `json:"url"`
 	} `json:"inspect"`
 	Lists struct {
-		GlobalAllowDomains []string `json:"global_allow_domains"`
-		GlobalDenyDomains  []string `json:"global_deny_domains"`
-		GlobalDenyKeywords []string `json:"global_deny_keywords"`
+		GlobalAllowDomains     []string `json:"global_allow_domains"`
+		EnforceGlobalAllowlist bool     `json:"enforce_global_allowlist"`
+		GlobalDenyDomains      []string `json:"global_deny_domains"`
+		GlobalDenyKeywords     []string `json:"global_deny_keywords"`
 	} `json:"lists"`
 	Text struct {
 		NSFWThreshold float32 `json:"nsfw_threshold"`
 	} `json:"text"`
+	Image struct {
+		SexyThreshold   float32 `json:"sexy_threshold"`
+		PornThreshold   float32 `json:"porn_threshold"`
+		HentaiThreshold float32 `json:"hentai_threshold"`
+	} `json:"image"`
+	Notifications struct {
+		Enabled      bool   `json:"enabled"`
+		NtfyURL      string `json:"ntfy_url"`
+		WebhookURL   string `json:"webhook_url"`
+		WebhookToken string `json:"webhook_token"`
+		OnBlock      bool   `json:"on_block"`
+		OnQuarantine bool   `json:"on_quarantine"`
+		OnPanic      bool   `json:"on_panic"`
+	} `json:"notifications"`
 }
 
 func defaults() *Settings {
@@ -43,6 +58,13 @@ func defaults() *Settings {
 	s.Inspect.Domain = true
 	s.Inspect.URL = true
 	s.Text.NSFWThreshold = 0.5
+	s.Image.SexyThreshold = 0.6
+	s.Image.PornThreshold = 0.5
+	s.Image.HentaiThreshold = 0.5
+	s.Notifications.Enabled = false
+	s.Notifications.OnBlock = true
+	s.Notifications.OnQuarantine = true
+	s.Notifications.OnPanic = true
 	return s
 }
 
