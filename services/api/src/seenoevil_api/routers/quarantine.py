@@ -42,15 +42,16 @@ class BulkResolveResponse(BaseModel):
     updated: int
 
 
-def make_router(get_session_dep, require_admin, _require_user, current_user) -> APIRouter:
+def make_router(get_session_dep, require_admin, require_user, current_user) -> APIRouter:
     r = APIRouter(prefix="/v1/quarantine", tags=["quarantine"])
 
-    @r.get("", response_model=list[QuarantineOut], dependencies=[Depends(require_admin)])
+    @r.get("", response_model=list[QuarantineOut], dependencies=[Depends(require_user)])
     def list_quarantine(
         session: Session = Depends(get_session_dep),
         status_: str = Query(default="pending", alias="status"),
         limit: int = Query(default=100, ge=1, le=1000),
         offset: int = Query(default=0, ge=0),
+        _current: tuple[str, str] = Depends(current_user),
     ) -> list[QuarantineItem]:
         if status_ not in _VALID_STATUSES and status_ != "all":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid status")
@@ -61,8 +62,12 @@ def make_router(get_session_dep, require_admin, _require_user, current_user) -> 
             stmt = stmt.where(QuarantineItem.ts >= _pending_cutoff())
         return list(session.scalars(stmt))
 
-    @r.get("/{item_id}", response_model=QuarantineOut, dependencies=[Depends(require_admin)])
-    def get_quarantine(item_id: int, session: Session = Depends(get_session_dep)) -> QuarantineItem:
+    @r.get("/{item_id}", response_model=QuarantineOut, dependencies=[Depends(require_user)])
+    def get_quarantine(
+        item_id: int,
+        session: Session = Depends(get_session_dep),
+        _current: tuple[str, str] = Depends(current_user),
+    ) -> QuarantineItem:
         obj = session.get(QuarantineItem, item_id)
         if obj is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "quarantine item not found")
@@ -145,7 +150,7 @@ def make_router(get_session_dep, require_admin, _require_user, current_user) -> 
     @r.post(
         "/{item_id}/flag",
         response_model=QuarantineOut,
-        dependencies=[Depends(require_admin)],
+        dependencies=[Depends(require_user)],
     )
     def flag_item(
         item_id: int,

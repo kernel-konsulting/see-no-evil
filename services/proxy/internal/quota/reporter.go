@@ -60,14 +60,18 @@ func (r *Reporter) NoteActivity(ip string) {
 
 // accumulate credits one active minute to every IP that was active during the
 // previous window, then clears the window. Called once per flush interval.
+// Uses map swap to hold lock for O(1).
 func (r *Reporter) accumulate() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for ip, seen := range r.active {
+	cur := r.active
+	r.active = make(map[string]bool, len(cur))
+	r.mu.Unlock()
+	for ip, seen := range cur {
 		if seen {
+			r.mu.Lock()
 			r.minutes[ip]++
+			r.mu.Unlock()
 		}
-		delete(r.active, ip)
 	}
 }
 

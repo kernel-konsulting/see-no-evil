@@ -49,7 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     authenticated,
     me,
     role: me?.role ?? null,
-    isAdmin: me?.role === "admin" || (authenticated && me === null),
+    isAdmin: me?.role === "admin",
     login,
     logout,
   };

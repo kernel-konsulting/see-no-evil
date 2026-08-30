@@ -102,12 +102,22 @@ SQLite (default) or PostgreSQL via the same `db.url`.
   three alert groups (availability / quality / backup). See
   [services/observability/README.md](../observability/README.md).
 
+**M11 review hardening (round 2):**
+
+- XFF trusted proxies now cover Docker/Podman `172.16.0.0/12` + `192.168.0.0/16` and `SEENOEVIL_TRUSTED_PROXIES` override; rate limiting no longer collapses behind Caddy.
+- Wizard generates `proxy.api_token` / `scanner.api_token` on first run so `fail_closed:true` fresh installs never brick.
+- CSRF double-submit enforced globally via middleware + UI axios `x-csrf-token` header.
+- Quarantine `GET`/`flag` now `require_user` (viewer can list + flag false positives); `allow`/`deny`/`delete` remain admin.
+- `POST /v1/profiles` and other mutating endpoints require CSRF header (tests use auto-injected header).
+- `backup restore` now rejects symlinks and uses `tarfile.data_filter` (Python 3.12+).
+- `cleanup_expired` uses naive UTC consistently; `panic` audit rows now HMAC-signed.
+- OIDC state bound to browser cookie + `nonce` to prevent fixation.
+
 **Deferred to follow-up M1 PRs:**
 
 - OPA / rego integration (the in-tree policy engine has the same interface,
   so the swap is local to `policy.py`).
 - WebAuthn (config knobs are present and validated; not consumed).
-- Audit retention rotation worker.
 
 ## Local development
 

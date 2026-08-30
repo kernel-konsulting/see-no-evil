@@ -134,6 +134,7 @@ def start_flow(
 
     verifier, challenge = _pkce_pair()
     state = _b64url(secrets.token_bytes(24))
+    nonce = _b64url(secrets.token_bytes(16))
     _purge_expired_states(session)
     _store(
         session,
@@ -142,6 +143,7 @@ def start_flow(
             "verifier": verifier,
             "redirect_url": redirect_url,
             "created": int(time.time()),
+            "nonce": nonce,
         },
     )
     session.flush()
@@ -153,6 +155,7 @@ def start_flow(
             "redirect_uri": redirect_url,
             "scope": " ".join(cfg.scopes),
             "state": state,
+            "nonce": nonce,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }

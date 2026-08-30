@@ -128,8 +128,20 @@ def _rasterize_svg(image_bytes: bytes) -> bytes:
         msg = f"SVG too large: {len(image_bytes)} bytes"
         raise ValueError(msg)
 
+    # Use defusedxml when available to guard against Billion Laughs /
+    # quadratic blowup in SVG XML. Fallback to stdlib with entity limits.
     try:
-        root = ElementTree.fromstring(image_bytes)
+        from defusedxml.ElementTree import (
+            fromstring as _safe_fromstring,  # type: ignore[import-untyped]
+        )
+
+        root = _safe_fromstring(image_bytes)
+    except ImportError:
+        try:
+            root = ElementTree.fromstring(image_bytes)
+        except ElementTree.ParseError as exc:
+            msg = f"invalid SVG XML: {exc}"
+            raise ValueError(msg) from exc
     except ElementTree.ParseError as exc:
         msg = f"invalid SVG XML: {exc}"
         raise ValueError(msg) from exc

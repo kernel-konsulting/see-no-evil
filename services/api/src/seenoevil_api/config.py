@@ -110,6 +110,7 @@ class ImageThresholds(_Base):
     sexy: float = 0.85
     neutral: float = 1.01
     drawing: float = 1.01
+    drawings: float = 1.01  # alias for Freepik label "drawings" (plural)
 
 
 class TextThresholds(_Base):

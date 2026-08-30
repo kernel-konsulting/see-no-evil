@@ -1122,14 +1122,22 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	}
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
-		return nil, rc
+		// On read error (e.g. truncated chunked encoding) return what we did
+		// get and drain the remainder as empty, so callers do not bypass
+		// classification by triggering an error path that returns the
+		// unbounded original body.
+		if snap == nil {
+			snap = []byte{}
+		}
+		return snap, io.NopCloser(bytes.NewReader(snap))
 	}
 	return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
 }
 
 // limitFor returns the per-content-type byte cap. Falls back to the legacy
 // MaxInspectBytes when a per-type cap isn't configured. Caps at hard max
-// even when configured to unlimited.
+// even when configured to unlimited. For generic/unknown CTs returns the
+// max inspect bytes so sniffed content is still buffered sufficiently.
 func (h *Handler) limitFor(ct string) int64 {
 	switch {
 	case isImage(ct) && h.cfg.MaxImageBytes > 0:
@@ -1150,6 +1158,17 @@ func (h *Handler) limitFor(ct string) int64 {
 			return hardMaxText
 		}
 		return v
+	}
+	// Generic/empty CT: may be sniffed as image/text later, so use the
+	// largest applicable cap rather than the minimal legacy value.
+	if ct == "" || strings.Contains(strings.ToLower(ct), "octet-stream") {
+		if h.cfg.MaxImageBytes > 0 {
+			v := h.cfg.MaxImageBytes
+			if v > hardMaxImage {
+				return hardMaxImage
+			}
+			return v
+		}
 	}
 	v := h.cfg.MaxInspectBytes
 	if v > hardMaxVideo {
