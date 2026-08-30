@@ -254,21 +254,21 @@ def main() -> None:
         default="cloudflare-family",
     )
 
-    # Proxy/scanner tokens — generate if not supplied via env so a fresh
-    # install never bricks filtering due to empty token + fail_closed:true.
-    proxy_token = os.environ.get("SEENOEVIL_PROXY_TOKEN") or ""
-    scanner_token = os.environ.get("SCANNER_API_TOKEN") or ""
-    if not proxy_token:
-        proxy_token = _generate_token()
-        print("  Generated proxy token (written to config.yaml)")
-        print("  Also set SEENOEVIL_PROXY_TOKEN env for compose deployments.")
-    if not scanner_token:
-        scanner_token = _generate_token()
-
     # ----------------------------------------------------------------
     # 3. Write config.yaml
     # ----------------------------------------------------------------
     if not config_exists:
+        # Proxy/scanner tokens — only generate when creating a new config
+        # so keeping an existing config does not discard generated secrets.
+        proxy_token = os.environ.get("SEENOEVIL_PROXY_TOKEN") or ""
+        scanner_token = os.environ.get("SCANNER_API_TOKEN") or ""
+        if not proxy_token:
+            proxy_token = _generate_token()
+            print("  Generated proxy token (written to config.yaml)")
+            print("  Also set SEENOEVIL_PROXY_TOKEN env for compose deployments.")
+        if not scanner_token:
+            scanner_token = _generate_token()
+            print("  Generated scanner token (written to config.yaml)")
         config_path.parent.mkdir(parents=True, exist_ok=True)
         cfg = _build_config(
             data_dir=data_dir,
@@ -282,7 +282,7 @@ def main() -> None:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
         print(f"\nConfig written to {config_path}")
     else:
-        print(f"\nUsing existing config at {config_path}")
+        print(f"\nUsing existing config at {config_path} (tokens preserved)")
 
     # ----------------------------------------------------------------
     # 4. Seed the database
@@ -311,8 +311,8 @@ def main() -> None:
       2. Browse to  https://{hostname}
          Log in with  {admin_email}
 
-      3. Install the MITM CA certificate on each device you want to filter.
-         (Download from  https://{hostname}/v1/proxy/ca.crt )
+       3. Install the MITM CA certificate on each device you want to filter.
+          (Download from  https://{hostname}/v1/ca/cert )
     """)
     )
 

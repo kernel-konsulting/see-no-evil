@@ -79,6 +79,8 @@ class Device(Base):
 
     profile: Mapped[Profile] = relationship(back_populates="devices")
 
+    __table_args__ = (Index("ix_devices_ip", "ip"),)
+
 
 class AuditDecision(Base):
     __tablename__ = "audit_decisions"
@@ -114,7 +116,10 @@ class Quota(Base):
     day: Mapped[date] = mapped_column(Date, nullable=False)
     minutes_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    __table_args__ = (UniqueConstraint("device_id", "day", name="uq_quota_device_day"),)
+    __table_args__ = (
+        UniqueConstraint("device_id", "day", name="uq_quota_device_day"),
+        Index("ix_quotas_device_id", "device_id"),
+    )
 
 
 class Setting(Base):

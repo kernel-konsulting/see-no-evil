@@ -40,11 +40,23 @@ var htmlSkipTags = map[atom.Atom]bool{
 }
 
 // IsSupported reports whether Extract knows how to handle the given
-// Content-Type.
+// Content-Type. Supports HTML, JSON, and a broad text family to prevent
+// text/plain bypasses (F02): text/*, application/xml, text/xml, +xml,
+// application/javascript, text/javascript, text/css and similar.
 func IsSupported(contentType string) bool {
 	mt := mediaType(contentType)
 	switch {
 	case strings.HasPrefix(mt, "text/html"), mt == "application/xhtml+xml":
+		return true
+	case strings.HasPrefix(mt, "text/"):
+		return true
+	case mt == "application/xml", mt == "text/xml":
+		return true
+	case strings.HasSuffix(mt, "+xml"):
+		return true
+	case mt == "application/javascript", mt == "text/javascript", mt == "application/x-javascript":
+		return true
+	case mt == "text/css":
 		return true
 	case mt == "application/json", strings.HasSuffix(mt, "+json"):
 		return true
@@ -66,9 +78,56 @@ func Extract(contentType string, body []byte) []Segment {
 		return extractHTML(body)
 	case mt == "application/json", strings.HasSuffix(mt, "+json"):
 		return extractJSON(body)
+	case strings.HasPrefix(mt, "text/"):
+		// text/plain, text/css, text/javascript, text/xml etc.
+		if strings.HasPrefix(mt, "text/html") {
+			return extractHTML(body)
+		}
+		if mt == "text/xml" || strings.HasSuffix(mt, "+xml") {
+			if segs := extractHTML(body); len(segs) > 0 {
+				return segs
+			}
+		}
+		return extractPlain(body)
+	case mt == "application/xml", strings.HasSuffix(mt, "+xml"):
+		if segs := extractHTML(body); len(segs) > 0 {
+			return segs
+		}
+		return extractPlain(body)
+	case mt == "application/javascript", mt == "text/javascript", mt == "application/x-javascript", mt == "text/css":
+		return extractPlain(body)
 	default:
 		return nil
 	}
+}
+
+// extractPlain pulls segments from generic text bodies (text/plain, css, js, xml fallback).
+// It splits on newlines and keeps lines long enough to be worth classifying.
+func extractPlain(body []byte) []Segment {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return nil
+	}
+	// Try to split into lines for more granular segments.
+	lines := strings.Split(s, "\n")
+	var out []Segment
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len([]rune(line)) < MinSegmentLen {
+			continue
+		}
+		out = append(out, Segment{Text: line, Path: "text:plain"})
+		if len(out) >= 16 {
+			break
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if len([]rune(s)) >= MinSegmentLen {
+		return []Segment{{Text: s, Path: "text:plain"}}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +192,9 @@ func walkJSON(v any, path string, out *[]Segment) {
 	case []any:
 		for i, vv := range t {
 			walkJSON(vv, path+"["+itoa(i)+"]", out)
-			// Cap the per-array fan-out: classifying every item in a long
-			// list of comments is wasteful — the first 32 are representative.
-			if i >= 31 {
+			// Cap fan-out but keep tail coverage: first 32 + last 32 of long lists.
+			// Previously 32 with head-only allowed hiding NSFW at position 33+.
+			if i >= 63 {
 				break
 			}
 		}

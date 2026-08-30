@@ -157,6 +157,25 @@ class DecideRequest(BaseModel):
     def _norm_mac(cls, v: str | None) -> str | None:
         return normalize_mac(v) if v else None
 
+    @field_validator("thumbnail_b64")
+    @classmethod
+    def _validate_thumb(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if len(v) > 50000:
+            raise ValueError("thumbnail_b64 too large")
+        # Validate base64 characters; allow empty string to be treated as None
+        if v == "":
+            return None
+        import base64 as _b64
+
+        try:
+            # validate=True ensures only base64 alphabet plus padding
+            _b64.b64decode(v, validate=True)
+        except Exception as exc:
+            raise ValueError("thumbnail_b64 must be valid base64") from exc
+        return v
+
 
 class DecideResponse(BaseModel):
     decision: str

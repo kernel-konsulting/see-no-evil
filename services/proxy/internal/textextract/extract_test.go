@@ -75,7 +75,13 @@ func TestIsSupported(t *testing.T) {
 		"application/json":        true,
 		"application/ld+json":     true,
 		"application/xhtml+xml":   true,
-		"text/plain":              false,
+		"text/plain":              true,
+		"text/css":                true,
+		"text/xml":                true,
+		"application/xml":         true,
+		"application/javascript":  true,
+		"text/javascript":         true,
+		"image/svg+xml":           true,
 		"image/jpeg":              false,
 		"":                        false,
 	}
@@ -146,11 +152,20 @@ func TestStripNoMatchReturnsOriginal(t *testing.T) {
 
 func TestStripUnsupportedReturnsOriginal(t *testing.T) {
 	body := []byte("hello")
-	out, changed := textextract.Strip("text/plain", body, redactBanned, "x")
+	out, changed := textextract.Strip("image/png", body, redactBanned, "x")
 	if changed {
-		t.Errorf("expected changed=false for text/plain")
+		t.Errorf("expected changed=false for image/png")
 	}
 	if string(out) != "hello" {
 		t.Errorf("expected unchanged body, got %q", out)
+	}
+	// text/plain is now supported (F02) — short body still unchanged due to MinSegmentLen.
+	body2 := []byte("hello")
+	out2, changed2 := textextract.Strip("text/plain", body2, redactBanned, "x")
+	if changed2 {
+		t.Errorf("expected changed=false for short text/plain")
+	}
+	if string(out2) != "hello" {
+		t.Errorf("expected unchanged body, got %q", out2)
 	}
 }

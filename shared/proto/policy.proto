@@ -1,7 +1,10 @@
-// see-no-evil — policy decision gRPC contract
+// see-no-evil — policy decision gRPC contract [DEPRECATED: HTTP instead]
 //
-// Called by the Go proxy after it has collected classifier scores; the API
-// service runs this and returns a final action.
+// Historically called by the Go proxy after collecting classifier scores.
+// Currently UNUSED: proxy uses HTTP POST /v1/decide (see proxy/internal/policy/client.go).
+// This file is kept for M2 OPA wiring reference and will be removed or implemented
+// when gRPC PolicyService lands. Do not add new fields without updating HTTP contract
+// in services/api/src/seenoevil_api/schemas.py DecidedRequest/DecideResponse.
 
 syntax = "proto3";
 

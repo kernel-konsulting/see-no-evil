@@ -88,8 +88,12 @@ func hostSuffixMatch(host, suffix string) bool {
 }
 
 func isGoogle(host string) bool {
-	return hostSuffixMatch(host, "google.com") || hostSuffixMatch(host, "googleapis.com") ||
-		strings.HasSuffix(bareHost(host), ".googleusercontent.com") ||
+	h := bareHost(host)
+	if strings.Contains(h, "google.") {
+		return true
+	}
+	return hostSuffixMatch(host, "googleapis.com") ||
+		strings.HasSuffix(h, ".googleusercontent.com") ||
 		hostSuffixMatch(host, "gstatic.com")
 }
 

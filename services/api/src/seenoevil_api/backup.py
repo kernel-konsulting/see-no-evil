@@ -19,9 +19,12 @@ Litestream via ``deploy/compose --profile litestream``; this CLI is the
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
+import sqlite3
 import sys
 import tarfile
+import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,6 +79,65 @@ def snapshot(config: AppConfig) -> Path:
 
     data_dir = _data_dir(config)
     db_path = _sqlite_path(config)
+    # F13: use sqlite3 backup API for consistent snapshot instead of tarring live DB
+    temp_backup: Path | None = None
+    temp_files: list[Path] = []
+    if db_path is not None and db_path.exists() and config.db.url.startswith("sqlite:"):
+        try:
+            # Create a consistent copy via sqlite backup API (hot backup safe)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+            tmp.close()
+            temp_backup = Path(tmp.name)
+            src = sqlite3.connect(str(db_path))
+            dst = sqlite3.connect(str(temp_backup))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
+        except Exception as exc:  # pragma: no cover - fallback to live file on error
+            log.warning("sqlite backup failed, falling back to live file: %s", exc)
+            if temp_backup and temp_backup.exists():
+                with contextlib.suppress(OSError):
+                    temp_backup.unlink()
+            temp_backup = None
+
+    if temp_backup is not None:
+        # Use backup copy instead of live DB + WAL/SHM
+        files = []
+        for p in _candidate_files(data_dir, None):
+            # Skip live DB files when we have a backup copy
+            if p == db_path or p.name in ("policy.db-wal", "policy.db-shm"):
+                continue
+            files.append(p)
+        # Add the temp backup as the DB file; we'll add it manually with arcname policy.db
+        temp_files = [temp_backup]
+        if not files and not temp_files:
+            raise FileNotFoundError(f"no backup-eligible files found under {data_dir}")
+        with tarfile.open(out_path, "w:gz") as tar:
+            for f in files:
+                arcname = (
+                    f.relative_to(data_dir) if data_dir in f.parents or f == data_dir else f.name
+                )
+                tar.add(f, arcname=str(arcname))
+            # Add the consistent DB backup as policy.db
+            # Determine arcname relative to data_dir
+            try:
+                if db_path and data_dir in db_path.parents:
+                    arcname_db = db_path.relative_to(data_dir)
+                else:
+                    arcname_db = Path("policy.db")
+            except Exception:
+                arcname_db = Path("policy.db")
+            tar.add(str(temp_backup), arcname=str(arcname_db))
+        # Cleanup temp file
+        with contextlib.suppress(OSError):
+            temp_backup.unlink()
+        total = len(files) + 1
+        log.info("wrote snapshot %s (%d files, via sqlite backup)", out_path, total)
+        prune(cfg)
+        return out_path
+
     files = list(_candidate_files(data_dir, db_path))
     if not files:
         raise FileNotFoundError(f"no backup-eligible files found under {data_dir}")

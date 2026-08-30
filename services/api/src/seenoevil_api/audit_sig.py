@@ -27,6 +27,14 @@ _SIG_KEY = "audit.hmac_secret"
 _HEX_LEN = 64
 
 
+def get_secret(session: Session) -> str | None:
+    """Return the audit signing secret if it exists, without creating it (F19)."""
+    row = session.get(Setting, _SIG_KEY)
+    if row is not None and isinstance(row.value, str) and row.value:
+        return row.value
+    return None
+
+
 def ensure_secret(session: Session) -> str:
     """Return the per-install audit signing secret, generating it on first use."""
     row = session.get(Setting, _SIG_KEY)
@@ -34,7 +42,21 @@ def ensure_secret(session: Session) -> str:
         return row.value
     secret = hashlib.sha256(secrets.token_bytes(48)).hexdigest()
     session.add(Setting(key=_SIG_KEY, value=secret))
-    session.flush()
+    try:
+        session.flush()
+    except Exception as exc:  # pragma: no cover - race
+        from sqlalchemy.exc import IntegrityError
+
+        if isinstance(exc, IntegrityError):
+            session.rollback()
+            row = session.get(Setting, _SIG_KEY)
+            if row is not None and isinstance(row.value, str) and row.value:
+                return row.value
+            # Retry once
+            session.add(Setting(key=_SIG_KEY, value=secret))
+            session.flush()
+            return secret
+        raise
     return secret
 
 

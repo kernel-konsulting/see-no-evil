@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .. import oidc
 from ..auth import (
     _login_limiter,
+    _secure_cookies,
     _setup_limiter,
     admin_is_configured,
     check_rate_limit,
@@ -110,7 +111,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
             max_age=600,
             httponly=True,
             samesite="lax",
-            secure=request.url.scheme == "https",
+            secure=_secure_cookies(request),
             path="/",
         )
         session.commit()

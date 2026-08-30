@@ -70,8 +70,9 @@ type ProxyConfig struct {
 	APIToken string `yaml:"api_token"`
 
 	// FailClosed makes classifier / policy failures block instead of
-	// allowing through. The default (false) is fail-open: an unhealthy
-	// classifier or API degrades filtering but does not break the network.
+	// allowing through. The default (true) is fail-closed: an unhealthy
+	// classifier or API blocks rather than silently disables filtering
+	// (strict parental-control appliance). Set false to revert to fail-open.
 	FailClosed bool `yaml:"fail_closed"`
 }
 
@@ -102,6 +103,7 @@ const unlimited int64 = 1 << 62
 
 // Hard caps protect the proxy from OOM when configured to "unlimited" or an
 // excessively large value. Even with unlimited, we must bound buffered bodies.
+// MUST stay in sync with services/proxy/internal/mitm/handler.go hardMax* (F32).
 const (
 	hardMaxImage = 20 << 20  // 20 MiB
 	hardMaxText  = 5 << 20   // 5 MiB
@@ -181,7 +183,19 @@ func Load(path string) (*Root, error) {
 
 	data, err := os.ReadFile(path) // #nosec G304 — intentional config file read
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		// F04 fallback: if /data/config.yaml missing before wizard, try example mount
+		if os.IsNotExist(err) {
+			for _, fb := range []string{"/etc/seenoevil/config.example.yaml", "./config.example.yaml"} {
+				if _, serr := os.Stat(fb); serr == nil {
+					path = fb
+					data, err = os.ReadFile(path)
+					break
+				}
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read config: %w", err)
+		}
 	}
 
 	var root Root
@@ -189,8 +203,42 @@ func Load(path string) (*Root, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// FailClosed defaults to true when the key is absent (F16). Use a
+	// yaml.Node walk to detect presence without mistaking commented lines.
+	if !hasFailClosedKey(data) {
+		root.Proxy.FailClosed = true
+	}
+
 	root.setDefaults()
 	return &root, nil
+}
+
+func hasFailClosedKey(data []byte) bool {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return false
+	}
+	if len(node.Content) == 0 {
+		return false
+	}
+	root := node.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "proxy" {
+			proxyNode := root.Content[i+1]
+			if proxyNode.Kind != yaml.MappingNode {
+				return false
+			}
+			for j := 0; j < len(proxyNode.Content); j += 2 {
+				if proxyNode.Content[j].Value == "fail_closed" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (r *Root) setDefaults() {

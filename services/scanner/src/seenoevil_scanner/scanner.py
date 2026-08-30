@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -82,9 +83,15 @@ def _detect_local_cidr() -> str | None:
         ).stdout
         for line in out.splitlines():
             # Example: "2: eth0    inet 10.88.0.23/16 brd 10.88.255.255 scope global eth0"
-            m = re.search(r"inet (\d+\.\d+\.\d+)\.\d+/\d+ .*scope global", line)
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+) .*scope global", line)
             if m:
-                return f"{m.group(1)}.0/24"
+                ip = m.group(1)
+                prefix = m.group(2)
+                try:
+                    net = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
+                    return str(net)
+                except ValueError:
+                    continue
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     # Fallback: parse /proc/net/route for the default gateway's interface.

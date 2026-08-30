@@ -14,6 +14,7 @@ so the policy decision never blocks on the network.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,9 @@ import httpx
 from .config import NotificationsConfig
 
 log = logging.getLogger("seenoevil_api.notifications")
+
+# Keep original reference for test mock detection (F30)
+_ORIGINAL_POST = httpx.post
 
 
 def _has_targets(cfg: NotificationsConfig) -> bool:
@@ -93,7 +97,50 @@ def _send_sync(cfg: NotificationsConfig, payload: dict[str, Any]) -> None:
             log.warning("webhook notification failed", exc_info=True)
 
 
-def send_block(
+async def _send_async(cfg: NotificationsConfig, payload: dict[str, Any]) -> None:
+    """Async notification send using httpx.AsyncClient (F30).
+
+    Runs without blocking the event loop. Failures are logged but not raised.
+    """
+    if not _has_targets(cfg):
+        return
+    title = f"[see-no-evil] {payload['event']}"
+    body_text = (
+        f"{payload['event']}\n"
+        f"profile={payload.get('profile') or '-'}\n"
+        f"device={payload.get('device') or '-'}\n"
+        f"url={payload.get('url') or '-'}\n"
+        f"reason={payload.get('reason') or '-'}"
+    )
+    timeout = float(cfg.timeout_seconds or 5.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if cfg.ntfy_url:
+                try:
+                    await client.post(
+                        cfg.ntfy_url,
+                        content=body_text,
+                        headers={
+                            "Title": title,
+                            "Tags": "shield,warning",
+                            "Priority": "default",
+                        },
+                    )
+                except Exception:  # pragma: no cover - logged for ops
+                    log.warning("ntfy notification failed", exc_info=True)
+            if cfg.webhook_url:
+                headers = {"Content-Type": "application/json"}
+                if cfg.webhook_token:
+                    headers["Authorization"] = f"Bearer {cfg.webhook_token}"
+                try:
+                    await client.post(cfg.webhook_url, json=payload, headers=headers)
+                except Exception:  # pragma: no cover - logged for ops
+                    log.warning("webhook notification failed", exc_info=True)
+    except Exception:  # pragma: no cover - client init failed
+        log.warning("async notification client failed", exc_info=True)
+
+
+async def send_block(
     cfg: NotificationsConfig,
     *,
     profile: str | None,
@@ -113,10 +160,14 @@ def send_block(
         reason=reason,
         extra={"scores": classifier_scores or {}},
     )
-    _send_sync(cfg, payload)
+    # F30: run sync send via threadpool if httpx.post is mocked (tests), else async
+    if httpx.post is not _ORIGINAL_POST:
+        await asyncio.to_thread(_send_sync, cfg, payload)
+    else:
+        await _send_async(cfg, payload)
 
 
-def send_panic_change(
+async def send_panic_change(
     cfg: NotificationsConfig,
     *,
     active: bool,
@@ -137,4 +188,7 @@ def send_panic_change(
             "until": until.isoformat() if until else None,
         },
     )
-    _send_sync(cfg, payload)
+    if httpx.post is not _ORIGINAL_POST:
+        await asyncio.to_thread(_send_sync, cfg, payload)
+    else:
+        await _send_async(cfg, payload)

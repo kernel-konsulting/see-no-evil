@@ -40,7 +40,14 @@ def make_router(get_session_dep, require_user, require_admin=None) -> APIRouter:
         rows = list(session.scalars(stmt.limit(limit)))
         if not rows:
             return []
-        secret = audit_sig.ensure_secret(session)
+        secret = audit_sig.get_secret(session)
+        if secret is None:
+            # No signing secret yet — no rows have been signed, so report None
+            # for all (read-only GET must not create the secret, F19).
+            return [
+                AuditOut.model_validate(row).model_copy(update={"signature_valid": None})
+                for row in rows
+            ]
         return [
             AuditOut.model_validate(row).model_copy(
                 update={

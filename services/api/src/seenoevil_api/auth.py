@@ -71,13 +71,45 @@ def _set_setting(session: Session, key: str, value: Any) -> None:
         row.value = value
 
 
+def rotate_jwt_secret(session: Session) -> str:
+    """Generate a fresh JWT signing secret, invalidating all existing sessions (F14)."""
+    secret = secrets.token_urlsafe(48)
+    _set_setting(session, _JWT_KEY, secret)
+    try:
+        session.flush()
+    except Exception:
+        # If flush fails due to race, retry by reading existing
+        session.rollback()
+        existing = _get_setting(session, _JWT_KEY)
+        if existing:
+            return str(existing)
+        _set_setting(session, _JWT_KEY, secret)
+        session.flush()
+    return secret
+
+
 def _ensure_jwt_secret(session: Session) -> str:
     secret = _get_setting(session, _JWT_KEY)
     if not secret:
         secret = secrets.token_urlsafe(48)
         _set_setting(session, _JWT_KEY, secret)
-        session.flush()
-    return secret
+        try:
+            session.flush()
+        except Exception as exc:
+            # Race: another writer inserted first — re-read (F19)
+            from sqlalchemy.exc import IntegrityError
+
+            if isinstance(exc, IntegrityError):
+                session.rollback()
+                existing = _get_setting(session, _JWT_KEY)
+                if existing:
+                    return str(existing)
+                # Retry once
+                _set_setting(session, _JWT_KEY, secret)
+                session.flush()
+                return secret
+            raise
+    return str(secret)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +134,8 @@ def set_admin_password(session: Session, email: str, password: str) -> None:
         user.password_hash = pwd_hash
         user.role = ROLE_ADMIN
         user.disabled = False
+    # F14: rotate JWT secret so existing sessions are invalidated immediately
+    rotate_jwt_secret(session)
 
 
 def admin_is_configured(session: Session) -> bool:
@@ -180,12 +214,16 @@ def update_user(
         raise ValueError("user not found")
     if password is not None:
         user.password_hash = hash_password(password)
+        rotate_jwt_secret(session)
     if role is not None:
         if role not in VALID_ROLES:
             raise ValueError(f"role must be one of {sorted(VALID_ROLES)}")
         user.role = role
     if disabled is not None:
         user.disabled = disabled
+        # F14: if disabling a user, rotation is optional — we keep it minimal
+        # to avoid invalidating all sessions; the disabled check in require_admin
+        # already blocks the user immediately. Rotate only on password change.
     session.commit()
     return user
 

@@ -91,6 +91,9 @@ def _purge_expired_states(session: Session) -> None:
 
 def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = None) -> dict:
     """Fetch and cache the OIDC discovery document (TTL 1h)."""
+    # F15: enforce https issuer (no http OIDC)
+    if not cfg.issuer or not cfg.issuer.startswith("https://"):
+        raise ValueError("oidc.issuer must be https")
     cached = _load(session, _DISCOVERY_KEY)
     if cached and cached.get("issuer") == cfg.issuer:
         # 3600s TTL — provider rotation picked up without restart.
@@ -117,6 +120,19 @@ def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = No
     finally:
         if own:
             client.close()
+    # F15: validate endpoints are https and token_endpoint host matches issuer
+    from urllib.parse import urlparse as _urlparse
+
+    issuer_host = _urlparse(cfg.issuer).hostname if cfg.issuer else None
+    for _key in ("authorization_endpoint", "token_endpoint", "userinfo_endpoint"):
+        _ep = doc.get(_key)
+        if _ep:
+            if not isinstance(_ep, str) or not _ep.startswith("https://"):
+                raise ValueError(f"oidc {_key} must be https")
+            if _key == "token_endpoint" and issuer_host:
+                tok_host = _urlparse(_ep).hostname
+                if tok_host != issuer_host:
+                    raise ValueError("oidc token_endpoint host must match issuer host")
     doc["fetched_at"] = int(time.time())
     doc["issuer"] = cfg.issuer
     _store(session, _DISCOVERY_KEY, doc)
@@ -250,18 +266,25 @@ def finish_flow(
         )
         ui.raise_for_status()
         info = ui.json()
+    except Exception:
+        # Make state single-use even on transient token/userinfo failures
+        _delete(session, _STATE_PREFIX + state)
+        session.flush()
+        raise
     finally:
         if own:
             client.close()
 
     email = info.get("email")
     if not email:
+        _delete(session, _STATE_PREFIX + state)
+        session.flush()
         raise ValueError("oidc userinfo response missing email")
     if cfg.allowed_emails and email.lower() not in {e.lower() for e in cfg.allowed_emails}:
         log.warning("oidc sign-in rejected: %s not in allowed_emails", email)
+        _delete(session, _STATE_PREFIX + state)
+        session.flush()
         raise PermissionError("email not permitted")
-    # Delete state only after successful verification — transient token/userinfo
-    # failures keep state for retry within TTL.
     _delete(session, _STATE_PREFIX + state)
     session.flush()
     return FinishedFlow(email=str(email))

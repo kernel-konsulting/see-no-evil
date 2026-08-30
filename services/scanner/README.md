@@ -71,3 +71,8 @@ under the hood. Future work tracked in PLAN.md (M7 scanner UI).
 - `perform_scan` uses `try-lock` (`acquire(blocking=False)`) -> `429 scan busy` instead of blocking 300s.
 - Control plane `/scan` now fail-closed (`401` when `SCANNER_TOKEN` unset) even on `127.0.0.1`.
 - Updater retry not in scanner but scanner now logs `host-network mode: using API base` at `INFO`.
+
+**M13 hardening:**
+
+- `_detect_local_cidr` now parses `ip -4 -o addr` `inet a.b.c.d/prefix` and `ipaddress.ip_network(..., strict=False)` → correct `10.88.0.0/16` instead of `/24` (F28).
+- `report_to_api` reuses `httpx.Client` with `follow_redirects=False` and validates `SCANNER_API_TOKEN` allow-list.
