@@ -98,6 +98,11 @@ func TestReporterKeepsCountersOnFailure(t *testing.T) {
 	}
 
 	fail = false
+	// Backoff from previous failure would block immediate retry — clear for test.
+	r.mu.Lock()
+	r.backoff = make(map[string]time.Time)
+	r.failCount = make(map[string]int)
+	r.mu.Unlock()
 	r.flush(context.Background())
 	r.mu.Lock()
 	after := r.minutes["192.168.1.10"]

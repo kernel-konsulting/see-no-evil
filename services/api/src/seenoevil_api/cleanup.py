@@ -48,13 +48,12 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
         session.commit()
     except OperationalError:
         # SQLite busy (database is locked) even after busy_timeout; retry
-        # once after a short back-off so the daily cleanup doesn't wedged.
+        # once so the daily cleanup doesn't wedged. No sleep here — caller is
+        # async (cleanup_loop) and blocking the event loop would stall all
+        # concurrent requests.
         session.rollback()
         log.warning("retention cleanup busy, retrying once")
         try:
-            import time
-
-            time.sleep(0.2)
             audit_deleted = (
                 session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount
                 or 0

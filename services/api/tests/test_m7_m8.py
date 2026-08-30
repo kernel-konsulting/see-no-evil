@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util as _ilu2
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,12 @@ from seenoevil_api.config import (
     PodConfig,
     ProfileConfig,
 )
+
+_spec2 = _ilu2.spec_from_file_location("_csrf2", Path(__file__).parent / "_csrf.py")
+_mod2 = _ilu2.module_from_spec(_spec2)  # type: ignore[arg-type]
+assert _spec2 and _spec2.loader
+_spec2.loader.exec_module(_mod2)  # type: ignore[union-attr]
+inject_csrf = _mod2.inject_csrf  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # M7 — discover stores ip + vendor; UI returns them
@@ -108,16 +115,7 @@ class _CsrfClient(TestClient):
     def request(self, method: str, url: str, **kwargs):  # type: ignore[override]
         headers = kwargs.get("headers") or {}
         kwargs["headers"] = headers
-        try:
-            csrf = None
-            for cookie in self.cookies.jar:  # type: ignore[attr-defined]
-                if cookie.name == "seenoevil_csrf":
-                    csrf = cookie.value
-                    break
-            if csrf and "x-csrf-token" not in {k.lower() for k in headers}:
-                headers["x-csrf-token"] = csrf
-        except Exception:
-            pass
+        inject_csrf(headers, self.cookies.jar)  # type: ignore[attr-defined]
         return super().request(method, url, **kwargs)
 
 

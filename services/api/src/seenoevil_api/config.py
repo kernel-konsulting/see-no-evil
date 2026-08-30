@@ -112,6 +112,20 @@ class ImageThresholds(_Base):
     drawing: float = 1.01
     drawings: float = 1.01  # alias for Freepik label "drawings" (plural)
 
+    @model_validator(mode="after")
+    def _sync_drawing_alias(self) -> ImageThresholds:
+        # Keep singular/plural in sync — operator may set either.
+        if self.drawing != 1.01 and self.drawings == 1.01:
+            self.drawings = self.drawing
+        elif self.drawings != 1.01 and self.drawing == 1.01:
+            self.drawing = self.drawings
+        elif self.drawings != self.drawing:
+            # Both set but differ — prefer more permissive (higher) to not over-block.
+            v = max(self.drawing, self.drawings)
+            self.drawing = v
+            self.drawings = v
+        return self
+
 
 class TextThresholds(_Base):
     toxic: float = 0.80

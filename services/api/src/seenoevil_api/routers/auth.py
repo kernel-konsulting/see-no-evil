@@ -130,7 +130,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "oidc disabled")
         # Verify browser-bound state cookie to prevent fixation.
         cookie_state = request.cookies.get("seenoevil_oidc_state")
-        if cookie_state and cookie_state != state:
+        if not cookie_state or cookie_state != state:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "oidc state mismatch")
         try:
             finished = oidc.finish_flow(cfg, session, code=code, state=state)

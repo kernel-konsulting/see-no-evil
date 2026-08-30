@@ -65,3 +65,10 @@ vars on the proxy container:
 |---|---|---|
 | `proxy.text_inspection.nsfw_threshold` | `TEXT_NSFW_THRESHOLD` | `0.5` |
 | `proxy.text_inspection.redaction`      | `TEXT_REDACTION`      | `[content removed by see-no-evil]` |
+
+**M12 hardening (whole-codebase):**
+
+- `LeafCache` now canonicalizes via `canonicalHost()` (strip port, lower-case) and uses double-checked locking to avoid mint under lock; `DNSNames` lower-cased.
+- `peekBody` unified via `hasImageMagic()`/`capped()` helpers, logs `peekBody read error` and increments `proxy_peek_body_errors_total`.
+- `limitFor` deduped via `capped()`, `shouldInspectWithBody`/`looksLikeImage` share `hasImageMagic()`.
+- Quota `Reporter` now batch-locks in `accumulate()` and has per-IP exponential backoff with jitter in `flush()`.

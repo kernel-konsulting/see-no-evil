@@ -32,12 +32,14 @@ HTTP_TIMEOUT   Seconds for HTTP requests (default 120).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -142,14 +144,41 @@ def _download(client: httpx.Client, artefact: Artefact, dest_dir: Path) -> None:
 
     with tempfile.NamedTemporaryFile(dir=dest_dir, delete=False) as tmp:
         tmp_path = Path(tmp.name)
-        try:
-            with client.stream("GET", artefact.url) as resp:
-                resp.raise_for_status()
-                for chunk in resp.iter_bytes(chunk_size=65536):
-                    tmp.write(chunk)
-        except Exception:
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                with client.stream("GET", artefact.url) as resp:
+                    resp.raise_for_status()
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        tmp.write(chunk)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3:
+                    backoff = 2 ** (attempt - 1)
+                    log.warning(
+                        "download %s attempt %d failed: %s — retrying in %ds",
+                        artefact.dest,
+                        attempt,
+                        exc,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    # Truncate partial download before retry
+                    with contextlib.suppress(Exception):
+                        tmp.seek(0)
+                        tmp.truncate(0)
+                else:
+                    with contextlib.suppress(Exception):
+                        tmp.close()
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+        if last_exc is not None:
+            with contextlib.suppress(Exception):
+                tmp.close()
             tmp_path.unlink(missing_ok=True)
-            raise
+            raise last_exc
 
     if artefact.sha256 and not artefact.sha256.startswith("PLACEHOLDER"):
         actual = _sha256_file(tmp_path)

@@ -61,6 +61,11 @@ var (
 		Name: "proxy_classifier_errors_total",
 		Help: "Classifier call failures (classified as allow-on-error)",
 	}, []string{"classifier"})
+
+	peekBodyErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "proxy_peek_body_errors_total",
+		Help: "Response body read errors during inspection (truncated chunked etc.)",
+	})
 )
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1112,32 @@ func markNoStore(h http.Header) {
 // Body peeking
 // ---------------------------------------------------------------------------
 
+func capped(v, max int64) int64 {
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func hasImageMagic(body []byte) bool {
+	if len(body) >= 2 && body[0] == 0xFF && body[1] == 0xD8 {
+		return true
+	}
+	if len(body) >= 8 && body[0] == 0x89 && string(body[1:4]) == "PNG" {
+		return true
+	}
+	if len(body) >= 3 && string(body[0:3]) == "GIF" {
+		return true
+	}
+	if len(body) >= 4 && string(body[0:4]) == "RIFF" {
+		return true
+	}
+	if len(body) >= 2 && body[0] == 0x42 && body[1] == 0x4D {
+		return true
+	}
+	return false
+}
+
 // peekBody reads up to limit bytes from rc and returns the snapshot plus a
 // new io.ReadCloser that replays the full body (snapshot + remainder).
 //
@@ -1117,15 +1148,16 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	if limit <= 0 {
 		limit = 10 << 20
 	}
-	if limit > hardMaxVideo {
-		limit = hardMaxVideo
-	}
+	limit = capped(limit, hardMaxVideo)
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
 		// On read error (e.g. truncated chunked encoding) return what we did
 		// get and drain the remainder as empty, so callers do not bypass
 		// classification by triggering an error path that returns the
-		// unbounded original body.
+		// unbounded original body. Truncation is intentional for bypass
+		// prevention, but we metric/log it so FailClosed can decide.
+		slog.Warn("peekBody read error", "err", err, "bytes", len(snap))
+		peekBodyErrors.Inc()
 		if snap == nil {
 			snap = []byte{}
 		}
@@ -1141,40 +1173,20 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 func (h *Handler) limitFor(ct string) int64 {
 	switch {
 	case isImage(ct) && h.cfg.MaxImageBytes > 0:
-		v := h.cfg.MaxImageBytes
-		if v > hardMaxImage {
-			return hardMaxImage
-		}
-		return v
+		return capped(h.cfg.MaxImageBytes, hardMaxImage)
 	case isVideo(ct) && h.cfg.MaxVideoBytes > 0:
-		v := h.cfg.MaxVideoBytes
-		if v > hardMaxVideo {
-			return hardMaxVideo
-		}
-		return v
+		return capped(h.cfg.MaxVideoBytes, hardMaxVideo)
 	case textextract.IsSupported(ct) && h.cfg.MaxTextBytes > 0:
-		v := h.cfg.MaxTextBytes
-		if v > hardMaxText {
-			return hardMaxText
-		}
-		return v
+		return capped(h.cfg.MaxTextBytes, hardMaxText)
 	}
 	// Generic/empty CT: may be sniffed as image/text later, so use the
 	// largest applicable cap rather than the minimal legacy value.
 	if ct == "" || strings.Contains(strings.ToLower(ct), "octet-stream") {
 		if h.cfg.MaxImageBytes > 0 {
-			v := h.cfg.MaxImageBytes
-			if v > hardMaxImage {
-				return hardMaxImage
-			}
-			return v
+			return capped(h.cfg.MaxImageBytes, hardMaxImage)
 		}
 	}
-	v := h.cfg.MaxInspectBytes
-	if v > hardMaxVideo {
-		return hardMaxVideo
-	}
-	return v
+	return capped(h.cfg.MaxInspectBytes, hardMaxVideo)
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,20 +1208,8 @@ func shouldInspectWithBody(ct string, body []byte) bool {
 	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	if ct == "" || ct == "application/octet-stream" || ct == "application/binary" ||
 		ct == "text/plain" || ct == "binary/octet-stream" {
-		if len(body) >= 2 {
-			// Image magic bytes: JPEG FF D8, PNG 89 50, GIF 47 49, WebP RIFF, BMP 42 4D
-			if body[0] == 0xFF && body[1] == 0xD8 {
-				return true
-			}
-			if len(body) >= 8 && body[0] == 0x89 && string(body[1:4]) == "PNG" {
-				return true
-			}
-			if len(body) >= 3 && string(body[0:3]) == "GIF" {
-				return true
-			}
-			if len(body) >= 4 && string(body[0:4]) == "RIFF" {
-				return true
-			}
+		if hasImageMagic(body) {
+			return true
 		}
 		// HTML sniff
 		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
@@ -1226,22 +1226,9 @@ func shouldInspectWithBody(ct string, body []byte) bool {
 }
 
 func looksLikeImage(body []byte) bool {
-	if len(body) >= 2 && body[0] == 0xFF && body[1] == 0xD8 {
-		return true
-	}
-	if len(body) >= 8 && body[0] == 0x89 && string(body[1:4]) == "PNG" {
-		return true
-	}
-	if len(body) >= 3 && string(body[0:3]) == "GIF" {
-		return true
-	}
-	if len(body) >= 8 && string(body[0:4]) == "RIFF" && string(body[8:12]) == "WEBP" {
-		return true
-	}
-	if len(body) >= 2 && body[0] == 0x42 && body[1] == 0x4D {
-		return true
-	}
-	return false
+	// Use shared magic helper; keep WEBP/BMP strict check for hasImageMagic,
+	// but also accept WEBP variant which is already covered by RIFF.
+	return hasImageMagic(body)
 }
 
 func effectiveIsImage(ct string, body []byte) bool {

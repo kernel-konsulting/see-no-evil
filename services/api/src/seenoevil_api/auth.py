@@ -10,6 +10,7 @@ declared in the schema but not yet consumed.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import os
 import secrets
@@ -34,7 +35,7 @@ SESSION_COOKIE = "seenoevil_session"
 # 4h reduces window after password change / disable; was 12h (#34).
 SESSION_TTL = timedelta(hours=4)
 JWT_ALG = "HS256"
-# Double-submit CSRF cookie/header names (utility, not yet wired globally).
+# Double-submit CSRF cookie/header names — enforced globally via middleware in app.py.
 CSRF_COOKIE = "seenoevil_csrf"
 CSRF_HEADER = "x-csrf-token"
 
@@ -215,6 +216,9 @@ def _secure_cookies(request: Request | None = None) -> bool:
     if env in ("1", "true", "yes", "on"):
         return True
     if request is not None:
+        # When behind Caddy, API sees http but browser sees https via X-Forwarded-Proto.
+        if request.headers.get("x-forwarded-proto", "").lower() == "https":
+            return True
         return request.url.scheme == "https"
     # Default: secure in prod (even behind Caddy, the browser still sees https).
     return True
@@ -288,11 +292,17 @@ def verify_csrf(request: Request) -> None:
     Safe methods and proxy/scanner bearer-auth paths are also exempt.
     """
     if os.environ.get("SEENOEVIL_DISABLE_CSRF", "").lower() in ("1", "true", "yes"):
+        log.warning("SEENOEVIL_DISABLE_CSRF is set — CSRF protection disabled (test-only)")
         return
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
         return
-    # Proxy/scanner bearer calls and unauthenticated setup/login flows are exempt.
-    if request.headers.get("Authorization", "").startswith("Bearer "):
+    # Proxy/scanner bearer calls are exempt only when no session cookie is
+    # present. Otherwise an attacker could add `Authorization: Bearer x` to a
+    # victim's browser request and bypass double-submit while the session
+    # cookie still authenticates.
+    if request.headers.get("Authorization", "").startswith("Bearer ") and not request.cookies.get(
+        SESSION_COOKIE
+    ):
         return
     path = request.url.path
     if (
@@ -318,7 +328,7 @@ def verify_csrf(request: Request) -> None:
 
 
 def require_csrf(request: Request) -> None:
-    """FastAPI dependency wrapper around verify_csrf for router use."""
+    """FastAPI dependency wrapper around verify_csrf for router use (kept for compat)."""
     verify_csrf(request)
 
 
@@ -428,11 +438,26 @@ class _RateLimiter:
                 return False
             hits.append(now)
             self._hits[key] = hits
+            # Periodic sweep of idle keys to bound memory (every ~1000 calls or when map large).
+            if len(self._hits) > 1000 and len(self._hits) % 100 == 0:
+                cutoff = now - self.window
+                stale = [k for k, v in self._hits.items() if not any(t > cutoff for t in v)]
+                for k in stale:
+                    del self._hits[k]
             return True
 
     def clear(self) -> None:
         with self._lock:
             self._hits.clear()
+
+    def sweep(self) -> None:
+        """Remove idle keys whose windows have expired (call occasionally)."""
+        now = time.monotonic()
+        with self._lock:
+            cutoff = now - self.window
+            stale = [k for k, v in self._hits.items() if not any(t > cutoff for t in v)]
+            for k in stale:
+                del self._hits[k]
 
 
 # 10 login attempts / 5 min per source IP; 5 setup attempts / 5 min.
@@ -447,68 +472,82 @@ def clear_rate_limiters() -> None:
 
 
 # Hosts/networks trusted to set X-Forwarded-For (Caddy / pod).
-# Compose's `internal` bridge hands out 172.16.0.0/12 + 192.168.0.0/16 addresses
-# to Caddy; the old allow-list (loopback only) made every LAN client collapse
-# to Caddy's container IP, breaking per-IP rate limiting (review #19).
+# Podman rootless uses 10.88.0.0/16, Docker uses 172.16.0.0/12 for the internal
+# bridge. Loopback and ULA/CG are also trusted. LAN subnets like 192.168.0.0/16
+# and 10.0.0.0/8 are *not* trusted by default — a LAN host must not be able to
+# spoof XFF to bypass rate limits. Operators can add LAN ranges explicitly via
+# SEENOEVIL_TRUSTED_PROXIES="192.168.1.10,10.0.0.0/24".
 _TRUSTED_PROXY_HOSTS = frozenset({"127.0.0.1", "::1", "10.0.0.1", "::ffff:127.0.0.1"})
-_TRUSTED_PROXY_PREFIXES = (
-    "127.",
-    "10.",
-    "172.16.",
-    "172.17.",
-    "172.18.",
-    "172.19.",
-    "172.20.",
-    "172.21.",
-    "172.22.",
-    "172.23.",
-    "172.24.",
-    "172.25.",
-    "172.26.",
-    "172.27.",
-    "172.28.",
-    "172.29.",
-    "172.30.",
-    "172.31.",
-    "192.168.",
-    "::1",
-    "fd00:",
-    "fe80:",
+_TRUSTED_PROXY_NETS = (
+    "127.0.0.0/8",
+    "10.88.0.0/16",
+    "172.16.0.0/12",
+    "fd00::/8",
+    "fe80::/10",
+    "::1/128",
 )
 
 
 def _host_is_trusted_proxy(host: str) -> bool:
     if host in _TRUSTED_PROXY_HOSTS:
         return True
-    # Env override: SEENOEVIL_TRUSTED_PROXIES="10.0.0.5,172.18.0.0/16"
     extra = os.environ.get("SEENOEVIL_TRUSTED_PROXIES", "")
     if extra:
         for token in extra.split(","):
             t = token.strip()
             if not t:
                 continue
-            if "/" in t:
-                # CIDR prefix check (simple textual prefix for common /16 or /24).
-                # Full ipaddress parsing would pull heavy deps for this hot path;
-                # textual prefix is sufficient for operator-supplied overrides.
-                prefix = t.split("/")[0].rsplit(".", 1)[0] + "."
-                if host.startswith(prefix):
+            try:
+                if "/" in t:
+                    net = ipaddress.ip_network(t, strict=False)
+                    if ipaddress.ip_address(host) in net:
+                        return True
+                elif host == t:
                     return True
-            elif host == t:
+                else:
+                    # Try as single IP equality via ipaddress for robustness.
+                    try:
+                        if ipaddress.ip_address(host) == ipaddress.ip_address(t):
+                            return True
+                    except ValueError:
+                        if host == t:
+                            return True
+            except ValueError:
+                if host == t:
+                    return True
+        # Env override augments defaults; if not matched, still check defaults
+        # so operator-added entries don't replace the container nets.
+    try:
+        ip = ipaddress.ip_address(host)
+        for net_str in _TRUSTED_PROXY_NETS:
+            if ip in ipaddress.ip_network(net_str):
                 return True
-    return any(host.startswith(prefix) for prefix in _TRUSTED_PROXY_PREFIXES)
+    except ValueError:
+        # Non-IP host (e.g. "localhost") — not trusted unless in hosts set.
+        return False
+    return False
 
 
 def client_ip(request: Request) -> str:
     host = request.client.host if request.client else "unknown"
     # Only trust X-Forwarded-For when the direct peer is a known trusted
     # proxy (Caddy / pod). Otherwise a LAN attacker could spoof any IP
-    # and bypass per-IP rate limits (#19).
+    # and bypass per-IP rate limits (#19). Use the last value (added by
+    # Caddy) not the first (attacker-controlled when Caddy appends).
     xff = request.headers.get("x-forwarded-for")
     if xff and _host_is_trusted_proxy(host):
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
+        # XFF may be "spoofed, real" when attacker injects before Caddy.
+        # Take the rightmost non-empty value which is the one Caddy appended.
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            last = parts[-1]
+            # If multiple values, the real client is the one before Caddy's
+            # append; with standard Caddy behaviour (append), last is real.
+            # When attacker sends single spoofed value, last == spoofed but
+            # attacker cannot rotate without hitting limiter on Caddy IP itself
+            # because Caddy overwrites when trusted_proxies configured. For
+            # defence in depth, if we see multiple hops, prefer the last.
+            return last
     return host
 
 

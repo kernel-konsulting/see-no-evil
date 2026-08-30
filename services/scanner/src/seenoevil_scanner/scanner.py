@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import yaml
@@ -156,12 +157,14 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
     # When running with host networking (default for ARP scans), `api`
     # DNS name won't resolve — fall back to host-accessible address.
     _api_base_raw = os.environ.get("API_BASE", "http://api:8000").rstrip("/")
-    if _api_base_raw == "http://api:8000" and os.environ.get("SCANNER_HOST_NETWORK", "0") in (
-        "1",
-        "true",
-    ):
-        _api_base_raw = os.environ.get("API_BASE_HOST", "http://127.0.0.1:8000")
-        log.warning("host-network mode: using API base %s", _api_base_raw)
+    try:
+        _parsed = urlparse(_api_base_raw if "://" in _api_base_raw else f"//{_api_base_raw}")
+        _host = _parsed.hostname or ""
+    except Exception:
+        _host = ""
+    if _host == "api" and os.environ.get("SCANNER_HOST_NETWORK", "0") in ("1", "true"):
+        _api_base_raw = os.environ.get("API_BASE_HOST", "http://127.0.0.1:8000").rstrip("/")
+        log.info("host-network mode: using API base %s", _api_base_raw)
     return ScannerConfig(
         enabled=bool(sec.get("enabled", False)),
         cidr=cidr,
@@ -290,50 +293,54 @@ _scan_lock = threading.Lock()
 
 def perform_scan(cfg: ScannerConfig) -> dict[str, Any]:
     """Run a single scan and report it. Returns a result summary dict."""
-    with _scan_lock:
+    if not _scan_lock.acquire(blocking=False):
+        log.warning("scan busy — concurrent sweep in progress")
+        return {"ok": False, "error": "scan busy, try again later"}
+    try:
         _SCAN_TOTAL.inc()
         started = time.time()
-        try:
-            output = run_nmap(cfg.cidr, cfg.nmap_args)
-            devices = parse_nmap_output(output)
-            _DEVICES_SEEN.set(len(devices))
-            log.info("scan complete: %d devices on %s", len(devices), cfg.cidr)
-            api_result: dict[str, Any] = {}
-            if devices:
-                api_result = report_to_api(cfg, devices)
-                created = sum(1 for i in api_result.get("items", []) if i.get("created"))
-                log.info("reported %d devices to api (%d new)", len(devices), created)
-            _LAST_SCAN_TS.set(time.time())
-            result: dict[str, Any] = {
-                "ok": True,
-                "cidr": cfg.cidr,
-                "devices_found": len(devices),
-                "devices_created": sum(1 for i in api_result.get("items", []) if i.get("created")),
-                "duration_seconds": round(time.time() - started, 2),
-            }
-            if not devices:
-                local = _detect_local_cidr()
-                result["note"] = (
-                    f"No devices found on {cfg.cidr}. The scanner sees network "
-                    f"{local or 'unknown'} from inside its container. On rootless "
-                    "Podman / Docker Desktop the container cannot ARP-discover "
-                    "devices on the host LAN — deploy on a Linux gateway with "
-                    "--network=host (or run on the actual router) for real LAN "
-                    "discovery. You can still add devices manually."
-                )
-            return result
-        except subprocess.TimeoutExpired:
-            _SCAN_ERRORS.inc()
-            log.exception("nmap timed out")
-            return {"ok": False, "error": "nmap timed out"}
-        except httpx.HTTPError as exc:
-            _SCAN_ERRORS.inc()
-            log.warning("api report failed: %s", exc)
-            return {"ok": False, "error": f"api report failed: {exc}"}
-        except Exception as exc:  # noqa: BLE001
-            _SCAN_ERRORS.inc()
-            log.exception("scan failed")
-            return {"ok": False, "error": str(exc)}
+        output = run_nmap(cfg.cidr, cfg.nmap_args)
+        devices = parse_nmap_output(output)
+        _DEVICES_SEEN.set(len(devices))
+        log.info("scan complete: %d devices on %s", len(devices), cfg.cidr)
+        api_result: dict[str, Any] = {}
+        if devices:
+            api_result = report_to_api(cfg, devices)
+            created = sum(1 for i in api_result.get("items", []) if i.get("created"))
+            log.info("reported %d devices to api (%d new)", len(devices), created)
+        _LAST_SCAN_TS.set(time.time())
+        result: dict[str, Any] = {
+            "ok": True,
+            "cidr": cfg.cidr,
+            "devices_found": len(devices),
+            "devices_created": sum(1 for i in api_result.get("items", []) if i.get("created")),
+            "duration_seconds": round(time.time() - started, 2),
+        }
+        if not devices:
+            local = _detect_local_cidr()
+            result["note"] = (
+                f"No devices found on {cfg.cidr}. The scanner sees network "
+                f"{local or 'unknown'} from inside its container. On rootless "
+                "Podman / Docker Desktop the container cannot ARP-discover "
+                "devices on the host LAN — deploy on a Linux gateway with "
+                "--network=host (or run on the actual router) for real LAN "
+                "discovery. You can still add devices manually."
+            )
+        return result
+    except subprocess.TimeoutExpired:
+        _SCAN_ERRORS.inc()
+        log.exception("nmap timed out")
+        return {"ok": False, "error": "nmap timed out"}
+    except httpx.HTTPError as exc:
+        _SCAN_ERRORS.inc()
+        log.warning("api report failed: %s", exc)
+        return {"ok": False, "error": f"api report failed: {exc}"}
+    except Exception as exc:  # noqa: BLE001
+        _SCAN_ERRORS.inc()
+        log.exception("scan failed")
+        return {"ok": False, "error": str(exc)}
+    finally:
+        _scan_lock.release()
 
 
 class _ControlHandler(BaseHTTPRequestHandler):
@@ -362,9 +369,8 @@ class _ControlHandler(BaseHTTPRequestHandler):
             or (cfg.api_token if cfg else None)
         )
         if not expected:
-            # No token configured — allow only because listener is localhost-only;
-            # log once so operator knows to set SCANNER_TOKEN in prod (#20).
-            return True
+            log.warning("SCANNER_TOKEN not set — control plane requires token (fail-closed)")
+            return False
         auth = self.headers.get("Authorization", "")
         alt = self.headers.get("X-Scanner-Token", "")
         provided = ""

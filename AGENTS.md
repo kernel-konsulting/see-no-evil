@@ -126,6 +126,12 @@ Key env vars:
 | `IMAGE_CLASSIFIER_ADDR` | proxy | gRPC target (default `image-classifier:50051`) |
 | `TEXT_CLASSIFIER_ADDR` | proxy | gRPC target (default `text-classifier:50052`) |
 | `API_ADDR` | proxy | Policy API HTTP base URL (default `api:8000`) |
+| `SEENOEVIL_TRUSTED_PROXIES` | api | Comma-separated CIDRs/IPs trusted for X-Forwarded-For (e.g. `10.88.0.0/16,172.16.0.0/12`) |
+| `SEENOEVIL_DISABLE_CSRF` | api | `1` to disable CSRF double-submit (test-only, never in prod) |
+| `SCANNER_HOST_NETWORK` | scanner | `1` when scanner runs with `network_mode: host` — enables `API_BASE_HOST` fallback |
+| `API_BASE_HOST` | scanner | Host-accessible API base when `SCANNER_HOST_NETWORK=1` (default `http://127.0.0.1:8000`) |
+| `SNE_SECURE_COOKIES` | api | `0` to allow http cookies in dev; `1` to force Secure |
+| `PROXY_CA_PASSPHRASE` | proxy | Passphrase for auto-generated CA key (AES-256-GCM) |
 
 ---
 
