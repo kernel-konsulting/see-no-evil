@@ -435,3 +435,15 @@ backup:
 litestream:
   enabled: false
   # replica_url: s3://my-bucket/policy.db
+
+# -----------------------------------------------------------------------------
+# Environment overrides (see AGENTS.md / CLAUDE.md Key env vars)
+# -----------------------------------------------------------------------------
+# SEENOEVIL_TRUSTED_PROXIES — comma-separated CIDRs/IPs trusted for
+#   X-Forwarded-For, e.g. "10.88.0.0/16,172.16.0.0/12". Defaults cover
+#   127.0.0.0/8 + 10.88.0.0/16 (Podman) + 172.16.0.0/12 (Docker) + fd00::/8.
+# SEENOEVIL_DISABLE_CSRF=1 — disables CSRF double-submit (test-only, never prod).
+# SNE_SECURE_COOKIES=0 — allow http cookies in dev; auto-detects https via
+#   X-Forwarded-Proto when behind Caddy.
+# SCANNER_HOST_NETWORK=1 + API_BASE_HOST=http://127.0.0.1:8000 — scanner host
+#   networking fallback when `api` DNS is unreachable.

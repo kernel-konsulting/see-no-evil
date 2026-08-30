@@ -1,7 +1,9 @@
 """Quarantine queue: list pending blocks and let an admin allow/deny them.
 
-All endpoints are admin-only because quarantined previews may contain sensitive
-blocked content.
+GET/list and flag are viewer-readable (require_user) so viewers can report
+false positives; allow/deny/bulk/delete remain admin-only because they
+change policy. Previews are blurred but still contain blocked URLs which are
+sensitive browsing history — viewer enumeration is intentional and audited.
 """
 
 from __future__ import annotations

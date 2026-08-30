@@ -22,9 +22,9 @@ from sqlalchemy.orm import Session
 from .auth import (
     current_user_factory,
     require_admin_factory,
-    require_csrf,
     require_user_factory,
     set_admin_password,
+    verify_csrf,
 )
 from .cleanup import cleanup_loop
 from .config import AppConfig, ProfileConfig, load_config
@@ -164,20 +164,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # Global CSRF enforcement for state-changing methods (double-submit).
     @app.middleware("http")
     async def _csrf_middleware(request, call_next):  # type: ignore[no-untyped-def]
-        # Exempt safe methods and unauthenticated setup/login paths.
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             try:
-                require_csrf(request)
-            except Exception as exc:  # noqa: BLE001
+                verify_csrf(request)
+            except HTTPException as exc:
                 from fastapi.responses import JSONResponse
 
-                # Let FastAPI's HTTPException handling produce proper JSON.
-                if hasattr(exc, "status_code"):
-                    return JSONResponse(
-                        status_code=exc.status_code,  # type: ignore[attr-defined]
-                        content={"detail": getattr(exc, "detail", str(exc))},
-                    )
-                raise
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": exc.detail},
+                )
         return await call_next(request)
 
     def get_config_dep() -> AppConfig:

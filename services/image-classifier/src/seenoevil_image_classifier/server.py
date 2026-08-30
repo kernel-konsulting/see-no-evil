@@ -35,6 +35,11 @@ from prometheus_client import Counter, Histogram, start_http_server
 
 from .generated import classify_pb2, classify_pb2_grpc
 
+try:
+    from defusedxml.ElementTree import fromstring as _safe_fromstring  # type: ignore[import-untyped]
+except ImportError:
+    _safe_fromstring = None  # type: ignore[assignment]
+
 log = logging.getLogger("image-classifier")
 
 # ---------------------------------------------------------------------------
@@ -128,21 +133,13 @@ def _rasterize_svg(image_bytes: bytes) -> bytes:
         msg = f"SVG too large: {len(image_bytes)} bytes"
         raise ValueError(msg)
 
-    # Use defusedxml when available to guard against Billion Laughs /
-    # quadratic blowup in SVG XML. Fallback to stdlib with entity limits.
-    try:
-        from defusedxml.ElementTree import (
-            fromstring as _safe_fromstring,  # type: ignore[import-untyped]
-        )
+    if _safe_fromstring is None:
+        raise ValueError("defusedxml required for SVG parsing (install defusedxml)")
 
+    try:
         root = _safe_fromstring(image_bytes)
-    except ImportError:
-        try:
-            root = ElementTree.fromstring(image_bytes)
-        except ElementTree.ParseError as exc:
-            msg = f"invalid SVG XML: {exc}"
-            raise ValueError(msg) from exc
-    except ElementTree.ParseError as exc:
+    except Exception as exc:  # defusedxml raises EntitiesForbidden, DTDForbidden, etc.
+        # Normalize all XML parse/entity errors to ValueError for caller.
         msg = f"invalid SVG XML: {exc}"
         raise ValueError(msg) from exc
 
