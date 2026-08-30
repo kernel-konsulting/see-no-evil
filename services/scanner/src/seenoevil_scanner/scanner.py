@@ -66,9 +66,11 @@ def _parse_duration(value: str | int | None, default: int) -> int:
 def _detect_local_cidr() -> str | None:
     """Best-effort: derive a /24 from the primary non-loopback IPv4 address.
 
-    Reads ``ip -4 -o addr`` and picks the first global-scope address. Returns
-    ``None`` if nothing usable is found.
+    Tries ``ip -4 -o addr`` first, falls back to ``/proc/net/route`` and
+    ``/proc/net/fib_trie`` style parsing so it works in minimal images
+    without iproute2.
     """
+    # Primary: ip command.
     try:
         out = subprocess.run(  # noqa: S603 - fixed argv
             ["ip", "-4", "-o", "addr"],
@@ -77,13 +79,36 @@ def _detect_local_cidr() -> str | None:
             timeout=5,
             check=False,
         ).stdout
+        for line in out.splitlines():
+            # Example: "2: eth0    inet 10.88.0.23/16 brd 10.88.255.255 scope global eth0"
+            m = re.search(r"inet (\d+\.\d+\.\d+)\.\d+/\d+ .*scope global", line)
+            if m:
+                return f"{m.group(1)}.0/24"
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    for line in out.splitlines():
-        # Example: "2: eth0    inet 10.88.0.23/16 brd 10.88.255.255 scope global eth0"
-        m = re.search(r"inet (\d+\.\d+\.\d+)\.\d+/\d+ .*scope global", line)
-        if m:
-            return f"{m.group(1)}.0/24"
+        pass
+    # Fallback: parse /proc/net/route for the default gateway's interface.
+    try:
+        with Path("/proc/net/route").open() as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "00000000":
+                    iface = parts[0]
+                    # Try to get iface addr via /proc or hostname -I
+                    out2 = subprocess.run(  # noqa: S603
+                        ["hostname", "-I"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    ).stdout
+                    for token in out2.split():
+                        m = re.match(r"(\d+\.\d+\.\d+)\.\d+", token.strip())
+                        if m:
+                            return f"{m.group(1)}.0/24"
+                    log.warning("could not determine IP for iface %s, using fallback", iface)
+                    break
+    except (OSError, ValueError):
+        pass
     return None
 
 
@@ -112,11 +137,31 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
             cfg_cidr = cidrs_val
     if env_cidr:
         cidr = env_cidr
+        if env_cidr == DEFAULT_CIDR:
+            log.warning("SCANNER_CIDR is default %s — verify it matches your LAN", DEFAULT_CIDR)
     elif cfg_cidr and cfg_cidr != DEFAULT_CIDR:
         cidr = str(cfg_cidr)
     else:
-        cidr = _detect_local_cidr() or DEFAULT_CIDR
-        log.info("auto-detected scan CIDR: %s", cidr)
+        detected = _detect_local_cidr()
+        if detected:
+            cidr = detected
+            log.info("auto-detected scan CIDR: %s", cidr)
+        else:
+            cidr = DEFAULT_CIDR
+            log.warning(
+                "could not auto-detect LAN CIDR (ip/hostname missing), falling back to %s — "
+                "set scanner.cidrs or SCANNER_CIDR to your LAN's subnet",
+                DEFAULT_CIDR,
+            )
+    # When running with host networking (default for ARP scans), `api`
+    # DNS name won't resolve — fall back to host-accessible address.
+    _api_base_raw = os.environ.get("API_BASE", "http://api:8000").rstrip("/")
+    if _api_base_raw == "http://api:8000" and os.environ.get("SCANNER_HOST_NETWORK", "0") in (
+        "1",
+        "true",
+    ):
+        _api_base_raw = os.environ.get("API_BASE_HOST", "http://127.0.0.1:8000")
+        log.warning("host-network mode: using API base %s", _api_base_raw)
     return ScannerConfig(
         enabled=bool(sec.get("enabled", False)),
         cidr=cidr,
@@ -124,7 +169,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ScannerConfig:
             sec.get("interval"),
             int(os.environ.get("SCANNER_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS)),
         ),
-        api_base=os.environ.get("API_BASE", "http://api:8000").rstrip("/"),
+        api_base=_api_base_raw,
         api_token=os.environ.get("API_TOKEN") or None,
         metrics_port=int(os.environ.get("METRICS_PORT", 9105)),
         control_port=int(os.environ.get("CONTROL_PORT", 9104)),

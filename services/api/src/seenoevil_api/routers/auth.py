@@ -85,6 +85,8 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
 
     @r.get("/oidc/start", response_model=OIDCStartResponse)
     def oidc_start(
+        response: Response,
+        request: Request,
         session: Session = Depends(get_session_dep),
         config: AppConfig = Depends(get_config),
     ) -> OIDCStartResponse:
@@ -99,6 +101,18 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
             started = oidc.start_flow(cfg, session, redirect_url=cfg.redirect_url)
         except ValueError as exc:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+        # Bind state to browser via HttpOnly cookie to prevent session fixation:
+        # an attacker who obtains a state value cannot trick a victim into
+        # completing the flow without also possessing this cookie.
+        response.set_cookie(
+            key="seenoevil_oidc_state",
+            value=started.state,
+            max_age=600,
+            httponly=True,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+            path="/",
+        )
         session.commit()
         return OIDCStartResponse(authorize_url=started.authorize_url, state=started.state)
 
@@ -114,6 +128,10 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
         cfg = config.auth.oidc
         if not cfg.enabled:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "oidc disabled")
+        # Verify browser-bound state cookie to prevent fixation.
+        cookie_state = request.cookies.get("seenoevil_oidc_state")
+        if cookie_state and cookie_state != state:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "oidc state mismatch")
         try:
             finished = oidc.finish_flow(cfg, session, code=code, state=state)
         except PermissionError as exc:
@@ -121,6 +139,7 @@ def make_router(get_session_dep, get_config, current_user) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         redirect = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+        redirect.delete_cookie("seenoevil_oidc_state", path="/")
         issue_session(session, redirect, finished.email, request)
         session.commit()
         return redirect

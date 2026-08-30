@@ -104,10 +104,27 @@ def oidc_config(tmp_db_url: str) -> AppConfig:
     )
 
 
+class _CsrfClient(TestClient):
+    def request(self, method: str, url: str, **kwargs):  # type: ignore[override]
+        headers = kwargs.get("headers") or {}
+        kwargs["headers"] = headers
+        try:
+            csrf = None
+            for cookie in self.cookies.jar:  # type: ignore[attr-defined]
+                if cookie.name == "seenoevil_csrf":
+                    csrf = cookie.value
+                    break
+            if csrf and "x-csrf-token" not in {k.lower() for k in headers}:
+                headers["x-csrf-token"] = csrf
+        except Exception:
+            pass
+        return super().request(method, url, **kwargs)
+
+
 @pytest.fixture
 def oidc_client(oidc_config: AppConfig) -> Iterator[TestClient]:
     app = create_app(oidc_config)
-    with TestClient(app) as c:
+    with _CsrfClient(app) as c:
         yield c
 
 

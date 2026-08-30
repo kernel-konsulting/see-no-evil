@@ -66,9 +66,11 @@ cd see-no-evil
 # Start the pod (creates volumes, pod, and runs all containers):
 ./deploy/pods/seenoevil.sh up
 
-# Then visit https://seenoevil.lan
+# Then visit https://seenoevil.lan (pod) or https://seenoevil.lan:8448 (compose, rootless)
 # Admin email: admin@example.local
 # Password: changeme (or set via SNE_INITIAL_ADMIN_PASSWORD env var)
+# Note: compose rootless defaults expose Caddy on 8088/8448 and DNS on 1053 — set
+# SNE_HTTP_PORT=80 SNE_HTTPS_PORT=443 SNE_DNS_PORT_UDP=53 when running as root.
 ```
 
 For podman / docker compose deployments, see the [`deploy/compose/`](deploy/compose/) README.

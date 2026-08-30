@@ -280,8 +280,10 @@ services:
       - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
     environment:
       SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
-      API_BASE: "http://api:8000"
+      # Host networking: `api` DNS won't resolve, so override via API_BASE_HOST.
+      API_BASE: "http://127.0.0.1:8000"
       API_TOKEN: "${SCANNER_API_TOKEN:-}"
+      SCANNER_HOST_NETWORK: "1"
       LOG_LEVEL: "${SCANNER_LOG_LEVEL:-INFO}"
       METRICS_PORT: "9102"
     healthcheck:

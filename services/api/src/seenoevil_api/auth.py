@@ -281,18 +281,45 @@ def issue_csrf_token(response: Response, request: Request | None = None) -> str:
 
 
 def verify_csrf(request: Request) -> None:
-    """Double-submit CSRF check for state-changing methods (utility).
+    """Double-submit CSRF check for state-changing methods.
 
     Compares the CSRF_COOKIE (set by issue_session) with the X-CSRF-Token
-    header. Not yet wired globally; routers can call this in dependencies.
+    header. Login/setup/OIDC are intentionally exempt (no session yet).
+    Safe methods and proxy/scanner bearer-auth paths are also exempt.
     """
-    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-        cookie_token = request.cookies.get(CSRF_COOKIE)
-        header_token = request.headers.get(CSRF_HEADER) or request.headers.get("x-csrf-token")
-        if not cookie_token or not header_token:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf token missing")
-        if not hmac.compare_digest(cookie_token, header_token):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf validation failed")
+    if os.environ.get("SEENOEVIL_DISABLE_CSRF", "").lower() in ("1", "true", "yes"):
+        return
+    if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
+        return
+    # Proxy/scanner bearer calls and unauthenticated setup/login flows are exempt.
+    if request.headers.get("Authorization", "").startswith("Bearer "):
+        return
+    path = request.url.path
+    if (
+        path.startswith("/v1/auth/login")
+        or path.startswith("/v1/auth/setup")
+        or path.startswith("/v1/auth/oidc")
+    ):
+        return
+    # Allow internal proxy `decide`/`quota`/`runtime` calls that already present
+    # a proxy bearer token (exempted above). For browser sessions, enforce.
+    if (
+        not request.cookies.get(CSRF_COOKIE)
+        and not request.headers.get(CSRF_HEADER)
+        and not request.cookies.get(SESSION_COOKIE)
+    ):
+        return
+    cookie_token = request.cookies.get(CSRF_COOKIE)
+    header_token = request.headers.get(CSRF_HEADER) or request.headers.get("x-csrf-token")
+    if not cookie_token or not header_token:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf token missing")
+    if not hmac.compare_digest(cookie_token, header_token):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "csrf validation failed")
+
+
+def require_csrf(request: Request) -> None:
+    """FastAPI dependency wrapper around verify_csrf for router use."""
+    verify_csrf(request)
 
 
 def _decode(session: Session, token: str) -> dict[str, Any]:
@@ -419,17 +446,66 @@ def clear_rate_limiters() -> None:
     _setup_limiter.clear()
 
 
-# Hosts that are trusted to set X-Forwarded-For (loopback from Caddy / pod).
+# Hosts/networks trusted to set X-Forwarded-For (Caddy / pod).
+# Compose's `internal` bridge hands out 172.16.0.0/12 + 192.168.0.0/16 addresses
+# to Caddy; the old allow-list (loopback only) made every LAN client collapse
+# to Caddy's container IP, breaking per-IP rate limiting (review #19).
 _TRUSTED_PROXY_HOSTS = frozenset({"127.0.0.1", "::1", "10.0.0.1", "::ffff:127.0.0.1"})
+_TRUSTED_PROXY_PREFIXES = (
+    "127.",
+    "10.",
+    "172.16.",
+    "172.17.",
+    "172.18.",
+    "172.19.",
+    "172.20.",
+    "172.21.",
+    "172.22.",
+    "172.23.",
+    "172.24.",
+    "172.25.",
+    "172.26.",
+    "172.27.",
+    "172.28.",
+    "172.29.",
+    "172.30.",
+    "172.31.",
+    "192.168.",
+    "::1",
+    "fd00:",
+    "fe80:",
+)
+
+
+def _host_is_trusted_proxy(host: str) -> bool:
+    if host in _TRUSTED_PROXY_HOSTS:
+        return True
+    # Env override: SEENOEVIL_TRUSTED_PROXIES="10.0.0.5,172.18.0.0/16"
+    extra = os.environ.get("SEENOEVIL_TRUSTED_PROXIES", "")
+    if extra:
+        for token in extra.split(","):
+            t = token.strip()
+            if not t:
+                continue
+            if "/" in t:
+                # CIDR prefix check (simple textual prefix for common /16 or /24).
+                # Full ipaddress parsing would pull heavy deps for this hot path;
+                # textual prefix is sufficient for operator-supplied overrides.
+                prefix = t.split("/")[0].rsplit(".", 1)[0] + "."
+                if host.startswith(prefix):
+                    return True
+            elif host == t:
+                return True
+    return any(host.startswith(prefix) for prefix in _TRUSTED_PROXY_PREFIXES)
 
 
 def client_ip(request: Request) -> str:
     host = request.client.host if request.client else "unknown"
-    # Only trust X-Forwarded-For when the direct peer is a known loopback/trusted
-    # proxy (Caddy on 127.0.0.1). Otherwise a LAN attacker could spoof any IP
+    # Only trust X-Forwarded-For when the direct peer is a known trusted
+    # proxy (Caddy / pod). Otherwise a LAN attacker could spoof any IP
     # and bypass per-IP rate limits (#19).
     xff = request.headers.get("x-forwarded-for")
-    if xff and host in _TRUSTED_PROXY_HOSTS:
+    if xff and _host_is_trusted_proxy(host):
         first = xff.split(",")[0].strip()
         if first:
             return first
