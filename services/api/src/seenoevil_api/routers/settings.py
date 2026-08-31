@@ -66,6 +66,64 @@ def _validate_patch(patch: dict[str, Any]) -> None:
                 status.HTTP_400_BAD_REQUEST,
                 f"unknown keys in {key}: {', '.join(sorted(unknown_nested))}",
             )
+        # Type validation per section
+        if key == "inspect":
+            for k, v in value.items():
+                if not isinstance(v, bool):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST, f"inspect.{k} must be a boolean"
+                    )
+        elif key == "lists":
+            for k, v in value.items():
+                if k == "enforce_global_allowlist" and not isinstance(v, bool):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "lists.enforce_global_allowlist must be a boolean",
+                    )
+                elif k in (
+                    "global_allow_domains",
+                    "global_deny_domains",
+                    "global_deny_keywords",
+                ) and (not isinstance(v, list) or not all(isinstance(x, str) for x in v)):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        f"lists.{k} must be a list of strings",
+                    )
+        elif key == "text":
+            for k, v in value.items():
+                if k == "nsfw_threshold" and (
+                    isinstance(v, bool) or not isinstance(v, int | float) or not 0 <= float(v) <= 1
+                ):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "text.nsfw_threshold must be a number between 0 and 1",
+                    )
+        elif key == "image":
+            for k, v in value.items():
+                if k in ("sexy_threshold", "porn_threshold", "hentai_threshold") and (
+                    isinstance(v, bool) or not isinstance(v, int | float) or not 0 <= float(v) <= 1
+                ):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        f"image.{k} must be a number between 0 and 1",
+                    )
+        elif key == "notifications":
+            for k, v in value.items():
+                if k in ("enabled", "on_block", "on_quarantine", "on_panic"):
+                    if not isinstance(v, bool):
+                        raise HTTPException(
+                            status.HTTP_400_BAD_REQUEST,
+                            f"notifications.{k} must be a boolean",
+                        )
+                elif (
+                    k in ("ntfy_url", "webhook_url", "webhook_token")
+                    and v is not None
+                    and not isinstance(v, str)
+                ):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        f"notifications.{k} must be a string or null",
+                    )
 
 
 def make_router(get_session_dep, require_admin, get_config) -> APIRouter:

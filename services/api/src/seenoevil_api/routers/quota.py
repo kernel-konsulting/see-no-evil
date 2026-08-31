@@ -12,25 +12,49 @@ are sampled is up to the caller.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..auth import require_proxy_factory
+from ..config import AppConfig
 from ..models import Device, Quota
 from ..schemas import QuotaHeartbeat, QuotaStatus
 
 
+def _quota_today(config: AppConfig) -> date:
+    """Return today's date in pod timezone (centralized quota day, F20)."""
+    try:
+        tz = ZoneInfo(config.pod.timezone or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).date()
+
+
+def quota_day(config: AppConfig) -> date:
+    return _quota_today(config)
+
+
 def _resolve_device(session: Session, body: QuotaHeartbeat) -> Device | None:
     if body.device_id is not None:
+        device = session.scalars(
+            select(Device).where(Device.id == body.device_id).options(joinedload(Device.profile))
+        ).first()
+        if device is not None:
+            return device
         return session.get(Device, body.device_id)
     if body.client_ip:
-        return session.scalars(select(Device).where(Device.ip == body.client_ip)).first()
+        return session.scalars(
+            select(Device).where(Device.ip == body.client_ip).options(joinedload(Device.profile))
+        ).first()
     if body.device_mac:
-        return session.scalars(select(Device).where(Device.mac == body.device_mac)).first()
+        return session.scalars(
+            select(Device).where(Device.mac == body.device_mac).options(joinedload(Device.profile))
+        ).first()
     return None
 
 
@@ -42,13 +66,14 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
     def heartbeat(
         body: QuotaHeartbeat,
         session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
         _proxy: str = Depends(require_proxy),
     ) -> QuotaStatus:
         device = _resolve_device(session, body)
         if device is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
 
-        today = datetime.now(UTC).date()
+        today = _quota_today(config)
         minutes = int(body.minutes)
         # Atomic upsert avoids the SELECT-then-INSERT/UPDATE race where two
         # concurrent heartbeats both see no row and one hits a unique-violation,
@@ -99,11 +124,12 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
         device_id: int,
         day: date | None = None,
         session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
     ) -> QuotaStatus:
         device = session.get(Device, device_id)
         if device is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
-        d = day or datetime.now(UTC).date()
+        d = day or _quota_today(config)
         row = session.scalars(
             select(Quota).where(Quota.device_id == device.id, Quota.day == d)
         ).first()
@@ -124,11 +150,12 @@ def make_router(get_session_dep, require_admin, get_config) -> APIRouter:
         device_id: int,
         day: date | None = None,
         session: Session = Depends(get_session_dep),
+        config: AppConfig = Depends(get_config),
     ) -> None:
         device = session.get(Device, device_id)
         if device is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
-        d = day or datetime.now(UTC).date()
+        d = day or _quota_today(config)
         row = session.scalars(
             select(Quota).where(Quota.device_id == device.id, Quota.day == d)
         ).first()

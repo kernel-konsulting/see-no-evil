@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -117,16 +118,13 @@ func (r *Reporter) flush(ctx context.Context) {
 			// Exponential backoff with jitter: 1m, 2m, 4m, 8m up to 10m + jitter
 			r.mu.Lock()
 			c := r.failCount[ip] + 1
-			if c > 4 {
-				c = 4
-			}
 			r.failCount[ip] = c
 			backoff := time.Duration(1<<uint(c-1)) * time.Minute
 			if backoff > 10*time.Minute {
 				backoff = 10 * time.Minute
 			}
-			// jitter ±10s
-			jitter := time.Duration((now.UnixNano()%20000)-10000) * time.Millisecond
+			// jitter ±10s per-IP
+			jitter := time.Duration(rand.Int63n(20000)-10000) * time.Millisecond
 			r.backoff[ip] = now.Add(backoff + jitter)
 			r.mu.Unlock()
 			continue // keep counters for the next tick

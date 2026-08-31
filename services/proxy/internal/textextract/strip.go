@@ -28,9 +28,41 @@ func Strip(contentType string, body []byte, redact Predicate, replacement string
 		return stripHTML(body, redact, replacement)
 	case mt == "application/json", strings.HasSuffix(mt, "+json"):
 		return stripJSON(body, redact, replacement)
+	case strings.HasPrefix(mt, "text/"):
+		if strings.HasPrefix(mt, "text/html") {
+			return stripHTML(body, redact, replacement)
+		}
+		if mt == "text/xml" || strings.HasSuffix(mt, "+xml") {
+			if out, changed := stripHTML(body, redact, replacement); changed {
+				return out, changed
+			}
+		}
+		return stripPlain(body, redact, replacement)
+	case mt == "application/xml", mt == "text/xml", strings.HasSuffix(mt, "+xml"):
+		if out, changed := stripHTML(body, redact, replacement); changed {
+			return out, changed
+		}
+		return stripPlain(body, redact, replacement)
+	case mt == "application/javascript", mt == "text/javascript", mt == "application/x-javascript", mt == "text/css":
+		return stripPlain(body, redact, replacement)
 	default:
 		return body, false
 	}
+}
+
+func stripPlain(body []byte, redact Predicate, replacement string) ([]byte, bool) {
+	s := string(body)
+	original := s
+	segs := extractPlain(body)
+	for _, seg := range segs {
+		if redact(seg.Text) {
+			s = strings.ReplaceAll(s, seg.Text, replacement)
+		}
+	}
+	if s == original {
+		return body, false
+	}
+	return []byte(s), true
 }
 
 // ---------------------------------------------------------------------------

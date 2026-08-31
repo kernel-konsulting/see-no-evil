@@ -317,7 +317,7 @@ func (s *Server) classifyFrames(
 	requestID string,
 ) ([]*classifyv1.Score, int, classifyv1.Action, string) {
 	if len(frames) == 0 {
-		return nil, 0, classifyv1.Action_ACTION_ALLOW, "video_sampler:no_frames_failed"
+		return nil, 0, classifyv1.Action_ACTION_BLOCK, "video_sampler:no_frames"
 	}
 
 	maxScores := map[string]float32{}

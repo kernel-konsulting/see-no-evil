@@ -123,6 +123,15 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 - Proxy `LeafCache` double-checked locking, canonical host helper, `capped()`/`hasImageMagic()`, quota batch lock + backoff.
 - Scanner host-network fallback via `urlparse`, try-lock `429`, fail-closed control plane, updater retry with backoff, rate-limiter sweep.
 
+**M13 review hardening (round 4 — whole-codebase, 39 items):**
+
+- **Filter bypass closed:** `text/*` + `application/xml`/`+xml`/`javascript`/`css` now classified (F02), `shouldInspectWithBody` sniffs `hasImageMagic` on any CT (F07), text caps 16→64 with head+tail sampling (F08), large-image truncation fail-closed (F09).
+- **Identity & quota:** `quota_day()` centralizes pod-TZ day boundary (F20), `Device.ip` indexed + auto-create rate-limited 20/hour + IP-collision check (F06), `decide` no longer honors `body.decision=allow` bypass (F03).
+- **Deployment:** `SEENOEVIL_CONFIG` now `/data/config.yaml` with fallback to `config.example.yaml` (F04), wizard only generates tokens on new config (F21), CA endpoint fixed `/v1/ca/cert`.
+- **Reliability:** `peekBody` preserves tail on error + `inspectionSem` 50 cap (F05/F18), `tunnel` 2m deadline (F11), `backup snapshot` uses sqlite backup API (F13), `cleanup` batches 1000 + aware UTC (F23), `notifications` async via `to_thread` (F30), quota backoff 10m + `rand` jitter per-IP (F25).
+- **Auth:** JWT rotated on password change (F14), `ensure_secret`/`_ensure_jwt_secret` catch `IntegrityError` + `GET /v1/audit` read-only (F19), OIDC issuer/https + `token_endpoint` host validation + `Secure` via `_secure_cookies` + single-use state (F15/F17/F26), last-admin patch guard (F35).
+- **Remaining polish:** quarantine bulk returns `skipped_expired` (F22), settings patch type-checked (F24), scanner CIDR via `ip_network` strict=False (F28), video zero-frames → `block` (F29), SafeSearch `google.` TLD (F36), hard caps doc sync (F32), policy.proto deprecated note (F33).
+
 **Deferred to follow-up M1 PRs:**
 
 - OPA / rego integration (the in-tree policy engine has the same interface,

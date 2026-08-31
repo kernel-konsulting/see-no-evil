@@ -72,3 +72,12 @@ vars on the proxy container:
 - `peekBody` unified via `hasImageMagic()`/`capped()` helpers, logs `peekBody read error` and increments `proxy_peek_body_errors_total`.
 - `limitFor` deduped via `capped()`, `shouldInspectWithBody`/`looksLikeImage` share `hasImageMagic()`.
 - Quota `Reporter` now batch-locks in `accumulate()` and has per-IP exponential backoff with jitter in `flush()`.
+
+**M13 hardening (round 4 — 39 items):**
+
+- **SSRF denylist:** `Transport.DialContext` `secureDial` blocks `127/10/172.16/192.168/169.254/fd00/fe80` literal + hostname-resolved private IPs; `tunnel` pre-dial check + 2m deadline (F01/F11).
+- **Text bypass:** `textextract.IsSupported` now `text/*`, `application/xml`, `+xml`, `javascript`, `css`; `Extract` + `Strip` handle `extractPlain` line-split; `effectiveIsText` `text/*` + printable-ratio fallback; `shouldInspectWithBody` sniffs `hasImageMagic` on any CT (F02/F07).
+- **Capacity:** `inspectionSem` 50 concurrent caps 500MiB OOM; `limitFor` generic → `hardMaxImage` 20MiB sniff cap; `peekBody` returns `MultiReader` on error; `inspectText` cap 16→64 head+tail; `walkJSON` cap 32→64 (F05/F08/F18).
+- **Fail-closed:** `proxy.fail_closed` defaults `true` when key absent via `yaml.Node` walk; `FailClosed` true blocks on classifier/policy/sampler zero-frames/`no_frames`; image `INVALID_ARGUMENT` → block (F09/F10/F16).
+- **Video:** zero frames now `ACTION_BLOCK video_sampler:no_frames` for FailClosed; `isVideoSamplerFailure` + `FramesScored==0` check.
+- **SafeSearch:** `isGoogle` now `strings.Contains(..., "google.")` covers `google.co.uk` etc (F36); YouTube `youtube-nocookie.com` already included.

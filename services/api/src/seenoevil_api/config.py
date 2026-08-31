@@ -396,7 +396,15 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
         path = env_path
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"config file not found: {p}")
+        # F04: when SEENOEVIL_CONFIG=/data/config.yaml and wizard hasn't run yet,
+        # fall back to the example config mounted at /etc/seenoevil/config.example.yaml
+        # so a fresh compose up doesn't crash before setup.
+        fallback = Path("/etc/seenoevil/config.example.yaml")
+        if fallback.exists():
+            log.warning("config %s not found, falling back to %s", p, fallback)
+            p = fallback
+        else:
+            raise FileNotFoundError(f"config file not found: {p}")
     raw: dict[str, Any] = yaml.safe_load(p.read_text()) or {}
     cfg = AppConfig.model_validate(raw)
     if not cfg.proxy.api_token and not os.environ.get("SEENOEVIL_PROXY_TOKEN"):

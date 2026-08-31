@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -29,23 +29,49 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
     """
     if retention_days <= 0:
         return {"audit": 0, "quarantine": 0}
-    # Use naive UTC cutoff consistently with DB storage (SQLite stores naive).
-    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
-    try:
-        audit_deleted = (
-            session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount or 0
-        )
-        quarantine_deleted = (
-            session.execute(
-                delete(QuarantineItem).where(
-                    QuarantineItem.status != "pending",
-                    QuarantineItem.resolved_at.is_not(None),
-                    QuarantineItem.resolved_at < cutoff,
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    audit_deleted = 0
+    quarantine_deleted = 0
+
+    def _batched_audit() -> int:
+        total = 0
+        while True:
+            ids = list(
+                session.scalars(
+                    select(AuditDecision.id).where(AuditDecision.ts < cutoff).limit(1000)
                 )
-            ).rowcount
-            or 0
-        )
-        session.commit()
+            )
+            if not ids:
+                break
+            res = session.execute(delete(AuditDecision).where(AuditDecision.id.in_(ids)))
+            total += res.rowcount or len(ids)
+            session.commit()
+        return total
+
+    def _batched_quarantine() -> int:
+        total = 0
+        while True:
+            ids = list(
+                session.scalars(
+                    select(QuarantineItem.id)
+                    .where(
+                        QuarantineItem.status != "pending",
+                        QuarantineItem.resolved_at.is_not(None),
+                        QuarantineItem.resolved_at < cutoff,
+                    )
+                    .limit(1000)
+                )
+            )
+            if not ids:
+                break
+            res = session.execute(delete(QuarantineItem).where(QuarantineItem.id.in_(ids)))
+            total += res.rowcount or len(ids)
+            session.commit()
+        return total
+
+    try:
+        audit_deleted = _batched_audit()
+        quarantine_deleted = _batched_quarantine()
     except OperationalError:
         # SQLite busy (database is locked) even after busy_timeout; retry
         # once so the daily cleanup doesn't wedged. No sleep here — caller is
@@ -54,21 +80,8 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
         session.rollback()
         log.warning("retention cleanup busy, retrying once")
         try:
-            audit_deleted = (
-                session.execute(delete(AuditDecision).where(AuditDecision.ts < cutoff)).rowcount
-                or 0
-            )
-            quarantine_deleted = (
-                session.execute(
-                    delete(QuarantineItem).where(
-                        QuarantineItem.status != "pending",
-                        QuarantineItem.resolved_at.is_not(None),
-                        QuarantineItem.resolved_at < cutoff,
-                    )
-                ).rowcount
-                or 0
-            )
-            session.commit()
+            audit_deleted = _batched_audit()
+            quarantine_deleted = _batched_quarantine()
         except OperationalError:
             session.rollback()
             log.warning("retention cleanup still busy, skipping this cycle")
