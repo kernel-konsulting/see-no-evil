@@ -84,7 +84,7 @@ repos:
         files: ^services/ui/src/
         types_or: [javascript, jsx, ts, tsx]
         additional_dependencies:
-          - eslint@10.8.1
+          - eslint@10.9.0
           - eslint-config-prettier@10.1.8
           - "@typescript-eslint/parser@8.67.0"
           - "@typescript-eslint/eslint-plugin@8.67.0"
