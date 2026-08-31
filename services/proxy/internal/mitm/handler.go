@@ -1476,10 +1476,7 @@ func effectiveIsText(ct string, body []byte) bool {
 	// Printable-ratio fallback: text/plain bypass defence. If the body is
 	// mostly printable ASCII, treat it as text that should be inspected.
 	sample := body[:min(1024, len(body))]
-	if isPrintableText(sample) {
-		return true
-	}
-	return false
+	return isPrintableText(sample)
 }
 
 func isPrintableText(b []byte) bool {
