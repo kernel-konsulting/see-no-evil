@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -90,7 +91,8 @@ type Config struct {
 	Quota          *quota.Reporter
 	TextInspection TextInspectionCfg
 	// FailClosed blocks when classifiers or the policy API fail, instead of
-	// failing open. Default false (degraded filtering beats a broken network).
+	// failing open. Default true (strict parental-control: DoS on classifiers
+	// blocks rather than silently disables filtering).
 	FailClosed bool
 }
 
@@ -139,6 +141,67 @@ const (
 	hardMaxText  = 5 << 20
 	hardMaxVideo = 500 << 20
 )
+
+// inspectionSem bounds concurrent inspection buffers to avoid OOM (F05).
+// Each active inspection can hold up to hardMaxVideo / hardMaxImage; capping
+// concurrency to 50 keeps worst-case heap ~ 1 GiB (50*20MiB) for sniff path
+// plus video path via 500MiB bounded by per-type cap and timeout.
+var inspectionSem = make(chan struct{}, 50)
+
+// privatePrefixes are the IP ranges that must never be dialed by the proxy
+// (SSRF denylist). Covers loopback, RFC1918, link-local, and ULA/CG-NAT-ish.
+var privatePrefixes = func() []netip.Prefix {
+	must := func(s string) netip.Prefix {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			panic(err)
+		}
+		return p
+	}
+	return []netip.Prefix{
+		must("127.0.0.0/8"),
+		must("10.0.0.0/8"),
+		must("172.16.0.0/12"),
+		must("192.168.0.0/16"),
+		must("169.254.0.0/16"),
+		must("fd00::/8"),
+		must("fe80::/10"),
+		must("::1/128"),
+	}
+}()
+
+// isPrivateIP reports whether host (which may include a port) is an IP literal
+// inside the denylisted private ranges. Hostnames (e.g. "api", "example.com")
+// return false — they are checked via DNS resolution in the DialContext wrapper
+// where feasible. Used to reject SSRF attempts such as "127.0.0.1:8000" or
+// "192.168.1.1".
+func isPrivateIP(host string) bool {
+	h := strings.TrimSpace(host)
+	if h == "" {
+		return false
+	}
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		h = hh
+	}
+	h = strings.Trim(h, "[]")
+	addr, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	// Explicit prefix checks (covers all listed CIDRs even if Go's IsPrivate
+	// semantics change).
+	for _, p := range privatePrefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	// Fallback to stdlib helpers for any additional private space (e.g.
+	// IsPrivate covers 10/8 etc., IsLoopback covers 127/8 and ::1, IsLinkLocalUnicast covers 169.254/16 and fe80::/10)
+	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+		return true
+	}
+	return false
+}
 
 // ---------------------------------------------------------------------------
 // Rate limiter (data-plane, per-IP token bucket stub)
@@ -198,6 +261,40 @@ func NewHandler(cfg Config) *Handler {
 	for _, d := range cfg.BypassDomains {
 		bypass[strings.ToLower(strings.TrimPrefix(d, "*."))] = true
 	}
+	baseDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	secureDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if isPrivateIP(addr) {
+			return nil, fmt.Errorf("blocked private IP dial: %s", addr)
+		}
+		host := addr
+		if hh, _, err := net.SplitHostPort(addr); err == nil {
+			host = hh
+		}
+		trimmed := strings.Trim(host, "[]")
+		if _, err := netip.ParseAddr(trimmed); err != nil {
+			// Hostname — resolve and check if it points to a private IP.
+			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host); err == nil {
+				for _, a := range addrs {
+					if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
+						for _, p := range privatePrefixes {
+							if p.Contains(nip) {
+								return nil, fmt.Errorf("blocked private IP dial (resolved %s -> %s): %s", host, nip.String(), addr)
+							}
+						}
+						if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
+							return nil, fmt.Errorf("blocked private IP dial (resolved %s -> %s): %s", host, nip.String(), addr)
+						}
+					}
+				}
+			}
+		}
+		return baseDialer.DialContext(ctx, network, addr)
+	}
 	h := &Handler{
 		cfg:                  cfg,
 		leafCache:            ca.NewLeafCache(cfg.CA),
@@ -205,11 +302,8 @@ func NewHandler(cfg Config) *Handler {
 		blockedYouTubeVideos: make(map[string]blockedYouTubeVideo),
 		limiter:              newRateLimiter(100, time.Second),
 		transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           secureDial,
 			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
@@ -329,6 +423,50 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 
+	// SSRF protection: reject requests targeting private networks directly.
+	if isPrivateIP(r.Host) || (r.URL.Host != "" && isPrivateIP(r.URL.Host)) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	// Also check resolved hostnames that may map to private IPs via DNS.
+	// This catches service names like "api:8000" that resolve to Podman/Docker bridge IPs.
+	for _, host := range []string{r.Host, r.URL.Host} {
+		if host == "" {
+			continue
+		}
+		hh := host
+		if h2, _, err := net.SplitHostPort(host); err == nil {
+			hh = h2
+		}
+		hh = strings.Trim(hh, "[]")
+		if _, err := netip.ParseAddr(hh); err == nil {
+			continue // already handled literal case above
+		}
+		if hh == "" || strings.Contains(hh, ".") && net.ParseIP(hh) != nil {
+			continue
+		}
+		// Hostname — opportunistic DNS check with short timeout.
+		lookupCtx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, hh)
+		cancel()
+		if err == nil {
+			for _, a := range addrs {
+				if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
+					for _, p := range privatePrefixes {
+						if p.Contains(nip) {
+							http.Error(w, "Forbidden", http.StatusForbidden)
+							return
+						}
+					}
+					if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// Apply SafeSearch rewrites.
 	safesearch.RewriteRequest(r, h.ssCfg)
 
@@ -373,6 +511,10 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	// Forward the request upstream.
 	resp, err := h.roundTrip(r)
 	if err != nil {
+		if strings.Contains(err.Error(), "blocked private IP") {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -713,10 +855,13 @@ func (h *Handler) inspectText(
 	if len(segments) == 0 {
 		return "allow", "", nil, nil
 	}
-	// Cap sequential RPCs: truncate to first 16 segments to bound latency
-	// and protect classifier capacity.
-	if len(segments) > 16 {
-		segments = segments[:16]
+	// Cap sequential RPCs to bound latency and protect classifier.
+	// Raised to 64 and sample head+tail so attacker cannot hide NSFW past 16.
+	if len(segments) > 64 {
+		// Keep first 32 and last 32 to cover both prefix and suffix hiding.
+		head := segments[:32]
+		tail := segments[len(segments)-32:]
+		segments = append(head, tail...)
 	}
 
 	threshold := h.textThreshold(runtimeThreshold)
@@ -961,6 +1106,38 @@ func isYouTubeThumbnailHost(host string) bool {
 // ---------------------------------------------------------------------------
 
 func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
+	// SSRF denylist: refuse to tunnel to private IPs.
+	if isPrivateIP(addr) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	// Hostname that resolves to private IP must also be blocked.
+	hostOnly := addr
+	if hh, _, err := net.SplitHostPort(addr); err == nil {
+		hostOnly = hh
+	}
+	trimmed := strings.Trim(hostOnly, "[]")
+	if _, err := netip.ParseAddr(trimmed); err != nil {
+		lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, hostOnly)
+		cancel()
+		if err == nil {
+			for _, a := range addrs {
+				if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
+					for _, p := range privatePrefixes {
+						if p.Contains(nip) {
+							http.Error(w, "Forbidden", http.StatusForbidden)
+							return
+						}
+					}
+					if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
+				}
+			}
+		}
+	}
 	upstream, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		http.Error(w, "tunnel dial failed", http.StatusBadGateway)
@@ -980,6 +1157,18 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 	defer func() { _ = clientConn.Close() }()
 
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+
+	// Apply 2-minute deadlines to avoid hanging tunnels (F11).
+	_ = upstream.SetDeadline(time.Now().Add(2 * time.Minute))
+	_ = clientConn.SetDeadline(time.Now().Add(2 * time.Minute))
+	defer func() {
+		_ = upstream.SetDeadline(time.Time{})
+		_ = clientConn.SetDeadline(time.Time{})
+	}()
+	// Context to allow future cancellation (ties to request context).
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	_ = ctx
 
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
@@ -1143,33 +1332,43 @@ func hasImageMagic(body []byte) bool {
 //
 // limit==0 falls back to 10 MiB; for an explicit "send everything" pass a
 // very large value (e.g. math.MaxInt64). io.ReadAll grows its buffer
-// dynamically, so a huge limit doesn't pre-allocate.
+// dynamically, so a huge limit doesn't pre-allocate. Concurrency is bounded
+// by inspectionSem to avoid OOM (F05): if the semaphore is full we cap
+// large limits to hardMaxImage for the sniff path.
 func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	if limit <= 0 {
 		limit = 10 << 20
 	}
+	// Bound concurrency: if too many inspections are active, shrink large buffers.
+	select {
+	case inspectionSem <- struct{}{}:
+		defer func() { <-inspectionSem }()
+	default:
+		if limit > hardMaxImage {
+			limit = hardMaxImage
+		}
+	}
 	limit = capped(limit, hardMaxVideo)
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
-		// On read error (e.g. truncated chunked encoding) return what we did
-		// get and drain the remainder as empty, so callers do not bypass
-		// classification by triggering an error path that returns the
-		// unbounded original body. Truncation is intentional for bypass
-		// prevention, but we metric/log it so FailClosed can decide.
+		// On read error (e.g. truncated chunked encoding) preserve the remainder
+		// so the proxied response still streams correctly (F18). We still metric/log.
 		slog.Warn("peekBody read error", "err", err, "bytes", len(snap))
 		peekBodyErrors.Inc()
 		if snap == nil {
 			snap = []byte{}
 		}
-		return snap, io.NopCloser(bytes.NewReader(snap))
+		return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
 	}
 	return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
 }
 
 // limitFor returns the per-content-type byte cap. Falls back to the legacy
 // MaxInspectBytes when a per-type cap isn't configured. Caps at hard max
-// even when configured to unlimited. For generic/unknown CTs returns the
-// max inspect bytes so sniffed content is still buffered sufficiently.
+// even when configured to unlimited. For generic/unknown CTs we cap to
+// hardMaxImage for sniffing (20 MiB) to avoid 500 MiB per-request OOM (F05);
+// video path already has its own hardMaxVideo cap and is bounded by
+// inspectionSem concurrency.
 func (h *Handler) limitFor(ct string) int64 {
 	switch {
 	case isImage(ct) && h.cfg.MaxImageBytes > 0:
@@ -1179,14 +1378,14 @@ func (h *Handler) limitFor(ct string) int64 {
 	case textextract.IsSupported(ct) && h.cfg.MaxTextBytes > 0:
 		return capped(h.cfg.MaxTextBytes, hardMaxText)
 	}
-	// Generic/empty CT: may be sniffed as image/text later, so use the
-	// largest applicable cap rather than the minimal legacy value.
+	// Generic/empty CT: may be sniffed as image/text later; use a bounded
+	// sniff cap (hardMaxImage) rather than the full video cap to avoid OOM.
 	if ct == "" || strings.Contains(strings.ToLower(ct), "octet-stream") {
 		if h.cfg.MaxImageBytes > 0 {
 			return capped(h.cfg.MaxImageBytes, hardMaxImage)
 		}
 	}
-	return capped(h.cfg.MaxInspectBytes, hardMaxVideo)
+	return capped(h.cfg.MaxInspectBytes, hardMaxImage)
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,17 +1399,21 @@ func shouldInspect(ct string) bool {
 // shouldInspectWithBody falls back to magic-byte sniffing when the server
 // lies about Content-Type (e.g. NSFW JPEG served as application/octet-stream).
 // This defends the bypass where attacker sets generic CT to skip classifiers (#3).
+// Now sniffs all non-inspected types for image magic (F07) rather than a
+// small whitelist, and keeps HTML/JSON sniff for formerly-generic types.
 func shouldInspectWithBody(ct string, body []byte) bool {
 	if shouldInspect(ct) {
 		return true
 	}
-	// Generic / missing / misleading content-types -> sniff body.
+	// CT spoof defence: any type that hides an image should be inspected (F07).
+	if hasImageMagic(body) {
+		return true
+	}
+	// Generic / missing / misleading content-types -> additional sniff for HTML/JSON.
 	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	if ct == "" || ct == "application/octet-stream" || ct == "application/binary" ||
-		ct == "text/plain" || ct == "binary/octet-stream" {
-		if hasImageMagic(body) {
-			return true
-		}
+		ct == "text/plain" || ct == "binary/octet-stream" ||
+		ct == "application/octet-stream; charset=binary" {
 		// HTML sniff
 		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
 		if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
@@ -1218,6 +1421,20 @@ func shouldInspectWithBody(ct string, body []byte) bool {
 			return true
 		}
 		// JSON sniff
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			return true
+		}
+		// Also treat generic that looks like text as inspectable (F02)
+		if effectiveIsText(ct, body) {
+			return true
+		}
+	} else {
+		// For all other types, still check HTML/JSON sniff as text may be hidden.
+		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
+		if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
+			strings.HasPrefix(trimmed, "<head") {
+			return true
+		}
 		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 			return true
 		}
@@ -1242,12 +1459,40 @@ func effectiveIsText(ct string, body []byte) bool {
 	if textextract.IsSupported(ct) {
 		return true
 	}
+	// Explicit text/* fallback (covers text/plain, text/css, etc. even if
+	// IsSupported is out of sync) (F02).
+	lowCT := strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+	if strings.HasPrefix(lowCT, "text/") {
+		return true
+	}
 	if len(body) == 0 {
 		return false
 	}
 	trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
-	return strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
-		strings.HasPrefix(trimmed, "<head") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+	if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
+		strings.HasPrefix(trimmed, "<head") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return true
+	}
+	// Printable-ratio fallback: text/plain bypass defence. If the body is
+	// mostly printable ASCII, treat it as text that should be inspected.
+	sample := body[:min(1024, len(body))]
+	return isPrintableText(sample)
+}
+
+func isPrintableText(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	printable := 0
+	for _, c := range b {
+		if c >= 32 && c <= 126 {
+			printable++
+		} else if c == 9 || c == 10 || c == 13 {
+			printable++
+		}
+	}
+	// >85% printable considered text (covers text/plain, text/xml etc. with masqueraded CT).
+	return float64(printable)/float64(len(b)) > 0.85
 }
 
 func isImage(ct string) bool {

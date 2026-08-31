@@ -42,6 +42,7 @@ class BulkResolveRequest(BaseModel):
 
 class BulkResolveResponse(BaseModel):
     updated: int
+    skipped_expired: int = 0
 
 
 def make_router(get_session_dep, require_admin, require_user, current_user) -> APIRouter:
@@ -55,6 +56,12 @@ def make_router(get_session_dep, require_admin, require_user, current_user) -> A
         offset: int = Query(default=0, ge=0),
         _current: tuple[str, str] = Depends(current_user),
     ) -> list[QuarantineItem]:
+        """List quarantine items.
+
+        For ``status=pending`` only items newer than the pending TTL (1h)
+        are returned; expired pending are hidden and counted as
+        ``skipped_expired`` in bulk operations.
+        """
         if status_ not in _VALID_STATUSES and status_ != "all":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid status")
         stmt = select(QuarantineItem).order_by(QuarantineItem.ts.desc()).offset(offset).limit(limit)
@@ -96,20 +103,33 @@ def make_router(get_session_dep, require_admin, require_user, current_user) -> A
         session: Session,
         who: str,
     ) -> BulkResolveResponse:
-        stmt = select(QuarantineItem).where(QuarantineItem.status == "pending")
+        cutoff = _pending_cutoff()
+        # Count expired pending among requested ids for skipped_expired accounting.
+        skipped_expired = 0
         if body.ids is not None:
             if not body.ids:
-                return BulkResolveResponse(updated=0)
-            stmt = stmt.where(QuarantineItem.id.in_(body.ids))
-        stmt = stmt.where(QuarantineItem.ts >= _pending_cutoff())
-        items = list(session.scalars(stmt))
+                return BulkResolveResponse(updated=0, skipped_expired=0)
+            all_stmt = select(QuarantineItem).where(
+                QuarantineItem.status == "pending", QuarantineItem.id.in_(body.ids)
+            )
+            all_items = list(session.scalars(all_stmt))
+            skipped_expired = sum(1 for obj in all_items if _naive_utc(obj.ts) < cutoff)
+            items = [obj for obj in all_items if _naive_utc(obj.ts) >= cutoff]
+        else:
+            stmt = (
+                select(QuarantineItem)
+                .where(QuarantineItem.status == "pending")
+                .where(QuarantineItem.ts >= cutoff)
+            )
+            items = list(session.scalars(stmt))
+            skipped_expired = 0
         now = datetime.now(UTC)
         for obj in items:
             obj.status = new_status
             obj.resolved_at = now
             obj.resolved_by = who
         session.commit()
-        return BulkResolveResponse(updated=len(items))
+        return BulkResolveResponse(updated=len(items), skipped_expired=skipped_expired)
 
     @r.post(
         "/{item_id}/allow",

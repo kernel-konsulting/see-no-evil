@@ -353,16 +353,18 @@ def test_proxy_forced_block_reason_is_audited_and_quarantined(admin_client: Test
     )
     assert r.status_code == 200, r.text
     assert r.json()["decision"] == "block"
-    assert r.json()["reason"] == "classifier:image:porn"
+    # F03: body.decision is now audit-only, policy decides via classifier_scores.
+    # Policy strips the "image:" prefix, so reason is "classifier:porn".
+    assert r.json()["reason"] == "classifier:porn"
 
     audit = admin_client.get("/v1/audit").json()
     row = next(a for a in audit if a["url"] == "https://example.com/proxy-blocked.jpg")
     assert row["decision"] == "block"
-    assert row["reason"] == "classifier:image:porn"
+    assert row["reason"] == "classifier:porn"
 
     items = admin_client.get("/v1/quarantine").json()
     item = next(q for q in items if q["url"] == "https://example.com/proxy-blocked.jpg")
-    assert item["reason"] == "classifier:image:porn"
+    assert item["reason"] == "classifier:porn"
 
 
 def test_quarantine_not_created_for_domain_block(admin_client: TestClient) -> None:
@@ -424,7 +426,8 @@ def test_quarantine_bulk_allow_and_deny(admin_client: TestClient) -> None:
 
     r = admin_client.post("/v1/quarantine/bulk-allow", json={})
     assert r.status_code == 200, r.text
-    assert r.json() == {"updated": 2}
+    assert r.json()["updated"] == 2
+    assert r.json().get("skipped_expired", 0) == 0
     assert admin_client.get("/v1/quarantine").json() == []
 
     _seed_image_block(admin_client, scores={"porn": 0.99})
@@ -434,7 +437,8 @@ def test_quarantine_bulk_allow_and_deny(admin_client: TestClient) -> None:
 
     r = admin_client.post("/v1/quarantine/bulk-deny", json={"ids": [selected_id]})
     assert r.status_code == 200, r.text
-    assert r.json() == {"updated": 1}
+    assert r.json()["updated"] == 1
+    assert r.json().get("skipped_expired", 0) == 0
     assert len(admin_client.get("/v1/quarantine").json()) == 1
 
 

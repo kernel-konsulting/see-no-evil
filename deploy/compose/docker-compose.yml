@@ -93,9 +93,9 @@ services:
     networks: [internal]
     volumes:
       - data:/data
-      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+      - ../../config.example.yaml:/etc/seenoevil/config.example.yaml:ro
     environment:
-      SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+      SEENOEVIL_CONFIG: /data/config.yaml
       # Shared secrets for in-pod callers (proxy → decide/runtime/heartbeat,
       # scanner → devices/discover). Must match the proxy/scanner containers.
       SEENOEVIL_PROXY_TOKEN: "${SEENOEVIL_PROXY_TOKEN:-}"
@@ -194,9 +194,10 @@ services:
       - "8443:8443"
     volumes:
       - proxy_data:/data
-      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+      - data:/data:ro
+      - ../../config.example.yaml:/etc/seenoevil/config.example.yaml:ro
     environment:
-      CONFIG_PATH: /etc/seenoevil/config.yaml
+      CONFIG_PATH: /data/config.yaml
       # Must match the api container's SEENOEVIL_PROXY_TOKEN.
       SEENOEVIL_PROXY_TOKEN: "${SEENOEVIL_PROXY_TOKEN:-}"
     depends_on:
@@ -277,9 +278,9 @@ services:
       - NET_ADMIN
     volumes:
       - data:/data
-      - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+      - ../../config.example.yaml:/etc/seenoevil/config.example.yaml:ro
     environment:
-      SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+      SEENOEVIL_CONFIG: /data/config.yaml
       # Host networking: `api` DNS won't resolve, so override via API_BASE_HOST.
       API_BASE: "http://127.0.0.1:8000"
       API_TOKEN: "${SCANNER_API_TOKEN:-}"

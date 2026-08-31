@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import audit_sig, notifications, panic, runtime
 from ..auth import require_proxy_factory
@@ -40,17 +40,46 @@ def _profile_view(p: Profile) -> ProfileView:
     )
 
 
+def _quota_today(config: AppConfig) -> date:
+    """Return today's date in the pod's local timezone (quota day).
+
+    Centralizes the timezone logic so decide and quota/heartbeat share the same
+    day boundary (F20). Falls back to UTC on invalid timezone.
+    """
+    try:
+        tz = ZoneInfo(config.pod.timezone or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).date()
+
+
+def quota_day(config: AppConfig) -> date:
+    """Public alias for _quota_today (used by quota router)."""
+    return _quota_today(config)
+
+
 def _resolve_device(session: Session, body: DecideRequest) -> tuple[Device | None, Profile | None]:
     device: Device | None = None
     if body.device_id is not None:
-        device = session.get(Device, body.device_id)
+        # Use joinedload to fetch profile eagerly and avoid extra round-trip
+        # under SQLite busy conditions (F12).
+        device = session.scalars(
+            select(Device).where(Device.id == body.device_id).options(joinedload(Device.profile))
+        ).first()
+        # Fallback to session.get if not found via select (unlikely)
+        if device is None:
+            device = session.get(Device, body.device_id)
     elif body.client_ip:
         # Preferred path: the proxy attributes by source IP (client MACs are
         # invisible at the TCP layer, and client-supplied MACs are untrusted).
-        device = session.scalars(select(Device).where(Device.ip == body.client_ip)).first()
+        device = session.scalars(
+            select(Device).where(Device.ip == body.client_ip).options(joinedload(Device.profile))
+        ).first()
     elif body.device_mac:
         # Kept for compatibility; the proxy no longer sends client-supplied MACs.
-        device = session.scalars(select(Device).where(Device.mac == body.device_mac)).first()
+        device = session.scalars(
+            select(Device).where(Device.mac == body.device_mac).options(joinedload(Device.profile))
+        ).first()
     profile = device.profile if device else None
     return device, profile
 
@@ -92,9 +121,30 @@ def _auto_create_device(
     seen before, so admins can discover devices passively (in addition to
     the scanner sweep and manual creation).
     """
+    # F06: if IP already exists, return existing to avoid synthetic MAC collision
+    if ip:
+        existing_by_ip = session.scalars(select(Device).where(Device.ip == ip)).first()
+        if existing_by_ip is not None:
+            return existing_by_ip
     seed_mac = mac or (_synthetic_mac_from_ip(ip) if ip else None)
     if not seed_mac:
         return None
+    # Avoid synthetic MAC collision: if seed_mac already exists, return it
+    existing_by_mac = session.scalars(select(Device).where(Device.mac == seed_mac)).first()
+    if existing_by_mac is not None:
+        return existing_by_mac
+    # F06: rate limiting — don't auto-create if too many devices created recently
+    try:
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        recent_count = session.scalar(
+            select(func.count()).select_from(Device).where(Device.created_at >= cutoff)
+        )
+        if recent_count is not None and recent_count > 20:
+            log.warning("auto-create rate limited: %s devices in last hour", recent_count)
+            return None
+    except Exception:
+        # If count query fails (e.g. SQLite busy), fall through and attempt create
+        pass
     if mac:
         suffix = mac.replace(":", "")[-6:].upper()
         name = f"auto-{suffix}"
@@ -114,6 +164,11 @@ def _auto_create_device(
         session.flush()
     except Exception:  # pragma: no cover - race: another writer just inserted it
         session.rollback()
+        # On race, re-check both IP and MAC
+        if ip:
+            by_ip = session.scalars(select(Device).where(Device.ip == ip)).first()
+            if by_ip is not None:
+                return by_ip
         return session.scalars(select(Device).where(Device.mac == seed_mac)).first()
     return device
 
@@ -211,8 +266,6 @@ def make_router(get_session_dep, get_config) -> APIRouter:
         panic_state = panic.get_state(session)
         if panic_state.active:
             decision = DecisionOutput("allow", "panic_relax")
-        elif body.decision in {"allow", "block"}:
-            decision = DecisionOutput(body.decision, body.reason or "proxy")
         else:
             decision = decide(
                 _profile_view(profile),
