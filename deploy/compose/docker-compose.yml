@@ -374,9 +374,9 @@ services:
   #   networks: [internal]
   #   volumes:
   #     - data:/data
-  #     - ../../config.example.yaml:/etc/seenoevil/config.yaml:ro
+  #     - ../../config.example.yaml:/etc/seenoevil/config.example.yaml:ro
   #   environment:
-  #     SEENOEVIL_CONFIG: /etc/seenoevil/config.yaml
+  #     SEENOEVIL_CONFIG: /data/config.yaml
   #     SNE_BACKUP_INTERVAL_SECONDS: "${SNE_BACKUP_INTERVAL_SECONDS:-86400}"
   #   entrypoint: ["/bin/sh", "-c"]
   #   command:

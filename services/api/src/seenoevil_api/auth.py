@@ -77,14 +77,18 @@ def rotate_jwt_secret(session: Session) -> str:
     _set_setting(session, _JWT_KEY, secret)
     try:
         session.flush()
-    except Exception:
-        # If flush fails due to race, retry by reading existing
-        session.rollback()
-        existing = _get_setting(session, _JWT_KEY)
-        if existing:
-            return str(existing)
-        _set_setting(session, _JWT_KEY, secret)
-        session.flush()
+    except Exception as exc:
+        from sqlalchemy.exc import IntegrityError
+
+        if isinstance(exc, IntegrityError):
+            session.rollback()
+            existing = _get_setting(session, _JWT_KEY)
+            if existing:
+                return str(existing)
+            _set_setting(session, _JWT_KEY, secret)
+            session.flush()
+            return secret
+        raise
     return secret
 
 

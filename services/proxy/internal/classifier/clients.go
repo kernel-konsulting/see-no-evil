@@ -53,22 +53,32 @@ func NewClientsFromAddrs(imageAddr, textAddr, videoAddr string) (*Clients, error
 }
 
 func dial(addr string) (*grpc.ClientConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	// MaxCallRecvMsgSize / MaxCallSendMsgSize are raised from the gRPC
-	// defaults (4 MiB) so images up to the proxy's byte cap actually reach
-	// the classifier. Without this, bodies between 4 MiB and the cap fail
-	// with ResourceExhausted and the proxy silently allows them unclassified.
 	const maxMsg = 64 << 20 // 64 MiB
-	//nolint:staticcheck // grpc.DialContext deprecated but replacement (NewClient) is not in all versions
-	return grpc.DialContext(ctx, addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxMsg),
-			grpc.MaxCallSendMsgSize(maxMsg),
-		),
-	)
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		//nolint:staticcheck // grpc.DialContext deprecated but replacement (NewClient) is not in all versions
+		conn, err := grpc.DialContext(ctx, addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(maxMsg),
+				grpc.MaxCallSendMsgSize(maxMsg),
+			),
+		)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		// Backoff 500ms, 1s, 2s, 4s
+		backoff := time.Duration(500*(1<<attempt)) * time.Millisecond
+		if backoff > 4*time.Second {
+			backoff = 4 * time.Second
+		}
+		time.Sleep(backoff)
+	}
+	return nil, lastErr
 }
 
 // Close shuts down all underlying gRPC connections.

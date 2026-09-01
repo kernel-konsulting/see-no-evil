@@ -10,13 +10,24 @@ package quota
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"log/slog"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
 	"sync"
 	"time"
 )
+
+func jitterMs() int64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return int64(binary.LittleEndian.Uint64(b[:])%20000) - 10000
+	}
+	// Fallback to math/rand
+	return mrand.Int63n(20000) - 10000
+}
 
 // maxReportedMinutes bounds a single heartbeat; the API rejects anything
 // above 24*60 anyway.
@@ -123,8 +134,8 @@ func (r *Reporter) flush(ctx context.Context) {
 			if backoff > 10*time.Minute {
 				backoff = 10 * time.Minute
 			}
-			// jitter ±10s per-IP
-			jitter := time.Duration(rand.Int63n(20000)-10000) * time.Millisecond
+			// jitter ±10s per-IP (crypto-rand, math/rand fallback)
+			jitter := time.Duration(jitterMs()) * time.Millisecond
 			r.backoff[ip] = now.Add(backoff + jitter)
 			r.mu.Unlock()
 			continue // keep counters for the next tick

@@ -89,12 +89,32 @@ func hostSuffixMatch(host, suffix string) bool {
 
 func isGoogle(host string) bool {
 	h := bareHost(host)
-	if strings.Contains(h, "google.") {
+	if h == "google.com" || strings.HasSuffix(h, ".google.com") {
 		return true
 	}
-	return hostSuffixMatch(host, "googleapis.com") ||
-		strings.HasSuffix(h, ".googleusercontent.com") ||
-		hostSuffixMatch(host, "gstatic.com")
+	if hostSuffixMatch(h, "googleapis.com") || strings.HasSuffix(h, ".googleusercontent.com") || hostSuffixMatch(h, "gstatic.com") {
+		return true
+	}
+	// Handle google ccTLDs (google.de, google.co.uk, etc.) by label matching.
+	// Checks that host contains a label == "google" with a valid TLD suffix,
+	// avoiding strings.Contains("google.") false positives like mygoogle.evil.com.
+	parts := strings.Split(h, ".")
+	for i, p := range parts {
+		if p != "google" {
+			continue
+		}
+		remaining := len(parts) - i - 1
+		if remaining == 1 {
+			// google.<tld> e.g. google.de, google.fr
+			if len(parts[i+1]) >= 2 && len(parts[i+1]) <= 6 {
+				return true
+			}
+		} else if remaining == 2 && parts[i+1] == "co" && len(parts[i+2]) == 2 {
+			// google.co.<cc> e.g. google.co.uk, google.co.jp
+			return true
+		}
+	}
+	return false
 }
 
 func isBing(host string) bool {
