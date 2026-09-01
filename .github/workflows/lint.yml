@@ -2,8 +2,39 @@ name: lint
 
 on:
   pull_request:
+    paths:
+      - "services/**"
+      - "shared/proto/**"
+      - "policies/**"
+      - "deploy/compose/**"
+      - "pyproject.toml"
+      - "ruff.toml"
+      - ".yamllint.yml"
+      - ".github/workflows/lint.yml"
+      - "**/*.py"
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
   push:
     branches: [main]
+    paths:
+      - "services/**"
+      - "shared/proto/**"
+      - "policies/**"
+      - "deploy/compose/**"
+      - "pyproject.toml"
+      - "ruff.toml"
+      - ".yamllint.yml"
+      - ".github/workflows/lint.yml"
+      - "**/*.py"
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+
+# Fix #1: cancel superseded runs on same ref (saves ~30-40% on force-pushes)
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

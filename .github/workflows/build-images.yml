@@ -5,26 +5,49 @@ on:
     paths:
       - "services/**"
       - "deploy/compose/**"
+      - "shared/proto/**"
       - ".github/workflows/build-images.yml"
   push:
     branches: [main]
     paths:
       - "services/**"
       - "deploy/compose/**"
+      - "shared/proto/**"
+
+# Fix #1: cancel superseded runs
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # Fix #5: compute platforms so PRs build only amd64 (saves ~45% of build minutes)
+  prepare:
+    name: prepare matrix
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.set.outputs.platforms }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'platforms=["linux/amd64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'platforms=["linux/amd64","linux/arm64"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: build ${{ matrix.service }} (${{ matrix.platform }})
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         service: [api, ui, proxy, dns, image-classifier, text-classifier, video-sampler, scanner, updater]
-        platform: [linux/amd64, linux/arm64]
+        platform: ${{ fromJson(needs.prepare.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v7
 
