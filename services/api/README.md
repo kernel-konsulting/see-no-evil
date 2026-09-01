@@ -167,8 +167,14 @@ required.
 ## Configuration surface
 
 All knobs come from the repo-root `config.yaml` (see `config.example.yaml`).
-The container expects it mounted at `/etc/seenoevil/config.yaml`; point
-`SEENOEVIL_CONFIG` at it.
+The container expects it mounted at `/data/config.yaml` (fallback to
+`/etc/seenoevil/config.example.yaml` before wizard); point
+`SEENOEVIL_CONFIG` at it. `proxy.fail_closed` defaults `true` (fail-closed)
+when absent; set `false` to revert to fail-open.
+**M13/M14 hardening:** `quota_day()` pod-TZ, fail-closed defaults, JWT
+rotation, OIDC host validation, backup sqlite hot-copy, tunnel SSRF denylist,
+text head+tail caps, video no_frames fail-closed-aware, cleanup naive UTC
+batches, peekBody drain, quota jitter crypto-rand, inspection 10s budget.
 
 ## Database
 

@@ -120,7 +120,7 @@ def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = No
     finally:
         if own:
             client.close()
-    # F15: validate endpoints are https and token_endpoint host matches issuer
+    # F15: validate endpoints are https and all hosts match issuer
     from urllib.parse import urlparse as _urlparse
 
     issuer_host = _urlparse(cfg.issuer).hostname if cfg.issuer else None
@@ -129,10 +129,10 @@ def discover(cfg: OIDCConfig, session: Session, client: httpx.Client | None = No
         if _ep:
             if not isinstance(_ep, str) or not _ep.startswith("https://"):
                 raise ValueError(f"oidc {_key} must be https")
-            if _key == "token_endpoint" and issuer_host:
-                tok_host = _urlparse(_ep).hostname
-                if tok_host != issuer_host:
-                    raise ValueError("oidc token_endpoint host must match issuer host")
+            if issuer_host:
+                ep_host = _urlparse(_ep).hostname
+                if ep_host != issuer_host:
+                    raise ValueError(f"oidc {_key} host must match issuer host")
     doc["fetched_at"] = int(time.time())
     doc["issuer"] = cfg.issuer
     _store(session, _DISCOVERY_KEY, doc)

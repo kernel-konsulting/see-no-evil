@@ -12,8 +12,7 @@ are sampled is up to the caller.
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -23,20 +22,8 @@ from sqlalchemy.orm import Session, joinedload
 from ..auth import require_proxy_factory
 from ..config import AppConfig
 from ..models import Device, Quota
+from ..quota_day import quota_day as _quota_today
 from ..schemas import QuotaHeartbeat, QuotaStatus
-
-
-def _quota_today(config: AppConfig) -> date:
-    """Return today's date in pod timezone (centralized quota day, F20)."""
-    try:
-        tz = ZoneInfo(config.pod.timezone or "UTC")
-    except (ZoneInfoNotFoundError, ValueError):
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz).date()
-
-
-def quota_day(config: AppConfig) -> date:
-    return _quota_today(config)
 
 
 def _resolve_device(session: Session, body: QuotaHeartbeat) -> Device | None:

@@ -138,12 +138,12 @@ proxy:
   #   openssl rand -hex 32
   api_token: ""
 
-  # When true, classifier / policy failures BLOCK instead of allowing
-  # through. The default (false) is fail-open: an unhealthy classifier or
-  # API degrades filtering but does not break the network. For a strict
-  # parental-control appliance set true so a DoS on classifiers cannot
-  # silently disable filtering (see docs/hardening.md). Podman/Kubernetes
-  # deployments should use fail_closed: true with liveness checks.
+  # When true (default), classifier / policy / sampler failures BLOCK
+  # instead of allowing through. Fail-closed is the safe default for a
+  # parental-control appliance: a DoS on classifiers cannot silently disable
+  # filtering. Set `fail_closed: false` to revert to fail-open (degraded
+  # filtering beats a broken network) for lab/debug deployments.
+  # See docs/hardening.md and services/proxy/internal/mitm hard caps.
   fail_closed: true
 
   # Text inspection mode (M4). The proxy extracts natural-language text from

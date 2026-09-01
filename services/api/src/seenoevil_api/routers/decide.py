@@ -16,6 +16,7 @@ from ..auth import require_proxy_factory
 from ..config import AppConfig
 from ..models import AuditDecision, Device, Profile, QuarantineItem, Quota
 from ..policy import DecisionInput, DecisionOutput, GlobalRules, ProfileView, decide, now_parts
+from ..quota_day import quota_day as _quota_today
 from ..schemas import DecideRequest, DecideResponse
 
 log = logging.getLogger("seenoevil_api.decide")
@@ -40,21 +41,9 @@ def _profile_view(p: Profile) -> ProfileView:
     )
 
 
-def _quota_today(config: AppConfig) -> date:
-    """Return today's date in the pod's local timezone (quota day).
-
-    Centralizes the timezone logic so decide and quota/heartbeat share the same
-    day boundary (F20). Falls back to UTC on invalid timezone.
-    """
-    try:
-        tz = ZoneInfo(config.pod.timezone or "UTC")
-    except (ZoneInfoNotFoundError, ValueError):
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz).date()
-
-
 def quota_day(config: AppConfig) -> date:
     """Public alias for _quota_today (used by quota router)."""
+
     return _quota_today(config)
 
 
@@ -125,6 +114,14 @@ def _auto_create_device(
     if ip:
         existing_by_ip = session.scalars(select(Device).where(Device.ip == ip)).first()
         if existing_by_ip is not None:
+            # Refresh last_seen so device attribution stays fresh
+            existing_by_ip.last_seen_at = datetime.now(UTC)
+            if ip and existing_by_ip.ip != ip:
+                existing_by_ip.ip = ip
+            try:
+                session.flush()
+            except Exception:
+                session.rollback()
             return existing_by_ip
     seed_mac = mac or (_synthetic_mac_from_ip(ip) if ip else None)
     if not seed_mac:
@@ -132,6 +129,13 @@ def _auto_create_device(
     # Avoid synthetic MAC collision: if seed_mac already exists, return it
     existing_by_mac = session.scalars(select(Device).where(Device.mac == seed_mac)).first()
     if existing_by_mac is not None:
+        existing_by_mac.last_seen_at = datetime.now(UTC)
+        if ip and existing_by_mac.ip != ip:
+            existing_by_mac.ip = ip
+        try:
+            session.flush()
+        except Exception:
+            session.rollback()
         return existing_by_mac
     # F06: rate limiting — don't auto-create if too many devices created recently
     try:
@@ -266,6 +270,18 @@ def make_router(get_session_dep, get_config) -> APIRouter:
         panic_state = panic.get_state(session)
         if panic_state.active:
             decision = DecisionOutput("allow", "panic_relax")
+        elif body.decision == "block" and body.reason and body.reason.startswith("classifier:"):
+            # Fail-closed audit path: proxy pre-blocked due to classifier/policy failure
+            # with empty scores (e.g. classifier:unavailable, video_sampler:no_frames).
+            # Trust block for audit/quarantine, but still validate reason is classifier:*.
+            # This closes allow-bypass (F03) while preserving forensics for fail-closed blocks.
+            # Normalize classifier:image:porn -> classifier:porn to match policy engine.
+            norm = body.reason.strip()
+            for prefix in ("classifier:image:", "classifier:video:", "classifier:text:"):
+                if norm.startswith(prefix):
+                    norm = "classifier:" + norm[len(prefix) :]
+                    break
+            decision = DecisionOutput("block", norm)
         else:
             decision = decide(
                 _profile_view(profile),
