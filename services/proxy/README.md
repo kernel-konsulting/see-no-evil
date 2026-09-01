@@ -79,5 +79,11 @@ vars on the proxy container:
 - **Text bypass:** `textextract.IsSupported` now `text/*`, `application/xml`, `+xml`, `javascript`, `css`; `Extract` + `Strip` handle `extractPlain` line-split; `effectiveIsText` `text/*` + printable-ratio fallback; `shouldInspectWithBody` sniffs `hasImageMagic` on any CT (F02/F07).
 - **Capacity:** `inspectionSem` 50 concurrent caps 500MiB OOM; `limitFor` generic → `hardMaxImage` 20MiB sniff cap; `peekBody` returns `MultiReader` on error; `inspectText` cap 16→64 head+tail; `walkJSON` cap 32→64 (F05/F08/F18).
 - **Fail-closed:** `proxy.fail_closed` defaults `true` when key absent via `yaml.Node` walk; `FailClosed` true blocks on classifier/policy/sampler zero-frames/`no_frames`; image `INVALID_ARGUMENT` → block (F09/F10/F16).
-- **Video:** zero frames now `ACTION_BLOCK video_sampler:no_frames` for FailClosed; `isVideoSamplerFailure` + `FramesScored==0` check.
-- **SafeSearch:** `isGoogle` now `strings.Contains(..., "google.")` covers `google.co.uk` etc (F36); YouTube `youtube-nocookie.com` already included.
+
+**M14 hardening (round 5 — whole-codebase follow-up, fail-closed default):**
+
+- **SSRF complete:** `privatePrefixes` adds `0.0.0.0/8`, CGNAT `100.64.0.0/10`, `198.18.0.0/15`, `::ffff:0:0/96`, `::/128`, `224.0.0.0/4`; `addrIsBlocked` unmaps IPv4-mapped IPv6, checks `IsUnspecified`; `hostResolvesToBlocked` unified helper; `secureDial`/`handlePlainHTTP`/`tunnel` fail-closed on DNS timeout when `FailClosed=true`; `tunnel` now resolves IPs once and dials verified IPs to avoid rebinding; `Transport.Proxy=nil` disables env proxy bypass (G1).
+- **Text/video:** `extractPlain` + `walkJSON` head+tail 32+32; `hasVideoMagic` `ftyp`/`moov` sniff for `octet-stream` video; `effectiveIsText` head+tail printable sample; `shouldInspectWithBody` always checks `effectiveIsText` for any CT; `isGoogle` proper label `google` TLD via split instead of `Contains`.
+- **Reliability:** `peekBody` drains errored body then `NopCloser(bytes)`; `inspectText` parallel 8 + 10s parent budget; `quota reporter` crypto jitter; `cleanup_loop` via `to_thread` + naive UTC cutoff + accumulating retry; `classifier dial` 5-attempt backoff; `rateLimiter` `unknown` bucket; `video-sampler` `no_frames` `ALLOW` + proxy `FramesScored==0` fail-closed gate.
+- **State:** `quota_day` shared helper; `decide` audit divergence `classifier:* block` trusted when scores empty; `last_seen` refreshed on IP/MAC dedup; `rotate_jwt_secret` `IntegrityError`-only; backup `try/finally` + `out_path` unlink + `_arcname` helper; `oidc` validates all endpoint hosts.
+- **Config:** `fail_closed: true` documented as safe default (set `false` for lab fail-open); `SEENOEVIL_CONFIG=/data/config.yaml` fallback documented; commented `backup` profile fixed.

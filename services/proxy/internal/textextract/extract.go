@@ -103,31 +103,35 @@ func Extract(contentType string, body []byte) []Segment {
 
 // extractPlain pulls segments from generic text bodies (text/plain, css, js, xml fallback).
 // It splits on newlines and keeps lines long enough to be worth classifying.
+// Returns head+tail (first 32 + last 32) to prevent suffix-hiding bypass.
 func extractPlain(body []byte) []Segment {
 	s := strings.TrimSpace(string(body))
 	if s == "" {
 		return nil
 	}
-	// Try to split into lines for more granular segments.
 	lines := strings.Split(s, "\n")
-	var out []Segment
+	var all []Segment
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if len([]rune(line)) < MinSegmentLen {
 			continue
 		}
-		out = append(out, Segment{Text: line, Path: "text:plain"})
-		if len(out) >= 16 {
-			break
+		all = append(all, Segment{Text: line, Path: "text:plain"})
+	}
+	if len(all) == 0 {
+		if len([]rune(s)) >= MinSegmentLen {
+			return []Segment{{Text: s, Path: "text:plain"}}
 		}
+		return nil
 	}
-	if len(out) > 0 {
-		return out
+	if len(all) <= 64 {
+		return all
 	}
-	if len([]rune(s)) >= MinSegmentLen {
-		return []Segment{{Text: s, Path: "text:plain"}}
-	}
-	return nil
+	// Head+tail: first 32 and last 32
+	out := make([]Segment, 0, 64)
+	out = append(out, all[:32]...)
+	out = append(out, all[len(all)-32:]...)
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -190,12 +194,18 @@ func walkJSON(v any, path string, out *[]Segment) {
 			walkJSON(vv, path+"."+k, out)
 		}
 	case []any:
-		for i, vv := range t {
-			walkJSON(vv, path+"["+itoa(i)+"]", out)
-			// Cap fan-out but keep tail coverage: first 32 + last 32 of long lists.
-			// Previously 32 with head-only allowed hiding NSFW at position 33+.
-			if i >= 63 {
-				break
+		n := len(t)
+		if n <= 64 {
+			for i, vv := range t {
+				walkJSON(vv, path+"["+itoa(i)+"]", out)
+			}
+		} else {
+			// Head+tail sample to prevent suffix hiding at index 65+
+			for i := 0; i < 32; i++ {
+				walkJSON(t[i], path+"["+itoa(i)+"]", out)
+			}
+			for i := n - 32; i < n; i++ {
+				walkJSON(t[i], path+"["+itoa(i)+"]", out)
 			}
 		}
 	case string:

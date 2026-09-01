@@ -29,7 +29,8 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
     """
     if retention_days <= 0:
         return {"audit": 0, "quarantine": 0}
-    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    # Use naive UTC cutoff consistently with DB storage (SQLite stores naive)
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
     audit_deleted = 0
     quarantine_deleted = 0
 
@@ -73,19 +74,22 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
         audit_deleted = _batched_audit()
         quarantine_deleted = _batched_quarantine()
     except OperationalError:
-        # SQLite busy (database is locked) even after busy_timeout; retry
-        # once so the daily cleanup doesn't wedged. No sleep here — caller is
-        # async (cleanup_loop) and blocking the event loop would stall all
-        # concurrent requests.
         session.rollback()
         log.warning("retention cleanup busy, retrying once")
         try:
-            audit_deleted = _batched_audit()
-            quarantine_deleted = _batched_quarantine()
+            import time as _time
+
+            _time.sleep(0.1)
+        except Exception:
+            pass
+        try:
+            # Retry and accumulate (don't overwrite already-committed counts)
+            audit_deleted += _batched_audit()
+            quarantine_deleted += _batched_quarantine()
         except OperationalError:
             session.rollback()
             log.warning("retention cleanup still busy, skipping this cycle")
-            return {"audit": 0, "quarantine": 0}
+            return {"audit": audit_deleted, "quarantine": quarantine_deleted}
     if audit_deleted or quarantine_deleted:
         log.info(
             "retention cleanup: deleted %d audit rows, %d quarantine rows (retention=%dd)",
@@ -96,12 +100,16 @@ def cleanup_expired(session: Session, retention_days: int) -> dict[str, int]:
     return {"audit": audit_deleted, "quarantine": quarantine_deleted}
 
 
+def _run_cleanup(session_factory, retention_days: int) -> None:
+    with session_factory() as session:
+        cleanup_expired(session, retention_days)
+
+
 async def cleanup_loop(session_factory, retention_days: int, stop: asyncio.Event) -> None:
     """Run cleanup once, then every 24h until ``stop`` is set."""
     while not stop.is_set():
         try:
-            with session_factory() as session:
-                cleanup_expired(session, retention_days)
+            await asyncio.to_thread(_run_cleanup, session_factory, retention_days)
         except Exception:  # noqa: BLE001 — keep the loop alive
             log.exception("retention cleanup failed")
         try:

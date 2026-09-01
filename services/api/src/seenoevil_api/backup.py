@@ -69,6 +69,35 @@ def _candidate_files(data_dir: Path, db_path: Path | None) -> Iterable[Path]:
         yield db_path
 
 
+def _arcname(path: Path, data_dir: Path) -> str:
+    """Return archive name for path relative to data_dir, falling back to basename."""
+    try:
+        if data_dir in path.parents or path == data_dir:
+            return str(path.relative_to(data_dir))
+    except Exception:
+        pass
+    return path.name
+
+
+def _create_sqlite_backup(db_path: Path) -> Path | None:
+    """Create a consistent SQLite backup via backup API; return temp path or None."""
+    try:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        tmp.close()
+        temp_backup = Path(tmp.name)
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(temp_backup))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        return temp_backup
+    except Exception as exc:  # pragma: no cover - fallback to live file on error
+        log.warning("sqlite backup failed, falling back to live file: %s", exc)
+        return None
+
+
 def snapshot(config: AppConfig) -> Path:
     """Create one snapshot tarball; return its path."""
     cfg = config.backup
@@ -79,72 +108,56 @@ def snapshot(config: AppConfig) -> Path:
 
     data_dir = _data_dir(config)
     db_path = _sqlite_path(config)
-    # F13: use sqlite3 backup API for consistent snapshot instead of tarring live DB
     temp_backup: Path | None = None
-    temp_files: list[Path] = []
     if db_path is not None and db_path.exists() and config.db.url.startswith("sqlite:"):
-        try:
-            # Create a consistent copy via sqlite backup API (hot backup safe)
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-            tmp.close()
-            temp_backup = Path(tmp.name)
-            src = sqlite3.connect(str(db_path))
-            dst = sqlite3.connect(str(temp_backup))
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
-        except Exception as exc:  # pragma: no cover - fallback to live file on error
-            log.warning("sqlite backup failed, falling back to live file: %s", exc)
-            if temp_backup and temp_backup.exists():
-                with contextlib.suppress(OSError):
-                    temp_backup.unlink()
+        temp_backup = _create_sqlite_backup(db_path)
+        if temp_backup is not None and not temp_backup.exists():
             temp_backup = None
 
     if temp_backup is not None:
-        # Use backup copy instead of live DB + WAL/SHM
-        files = []
-        for p in _candidate_files(data_dir, None):
-            # Skip live DB files when we have a backup copy
-            if p == db_path or p.name in ("policy.db-wal", "policy.db-shm"):
-                continue
-            files.append(p)
-        # Add the temp backup as the DB file; we'll add it manually with arcname policy.db
-        temp_files = [temp_backup]
-        if not files and not temp_files:
-            raise FileNotFoundError(f"no backup-eligible files found under {data_dir}")
-        with tarfile.open(out_path, "w:gz") as tar:
-            for f in files:
-                arcname = (
-                    f.relative_to(data_dir) if data_dir in f.parents or f == data_dir else f.name
-                )
-                tar.add(f, arcname=str(arcname))
-            # Add the consistent DB backup as policy.db
-            # Determine arcname relative to data_dir
-            try:
-                if db_path and data_dir in db_path.parents:
-                    arcname_db = db_path.relative_to(data_dir)
-                else:
-                    arcname_db = Path("policy.db")
-            except Exception:
-                arcname_db = Path("policy.db")
-            tar.add(str(temp_backup), arcname=str(arcname_db))
-        # Cleanup temp file
-        with contextlib.suppress(OSError):
-            temp_backup.unlink()
-        total = len(files) + 1
-        log.info("wrote snapshot %s (%d files, via sqlite backup)", out_path, total)
-        prune(cfg)
-        return out_path
+        try:
+            files = []
+            for p in _candidate_files(data_dir, None):
+                if p == db_path or p.name in ("policy.db-wal", "policy.db-shm"):
+                    continue
+                files.append(p)
+            if not files:
+                raise FileNotFoundError(f"no backup-eligible files found under {data_dir}")
+            with tarfile.open(out_path, "w:gz") as tar:
+                for f in files:
+                    tar.add(f, arcname=_arcname(f, data_dir))
+                try:
+                    if db_path and data_dir in db_path.parents:
+                        arcname_db = str(db_path.relative_to(data_dir))
+                    else:
+                        arcname_db = "policy.db"
+                except Exception:
+                    arcname_db = "policy.db"
+                tar.add(str(temp_backup), arcname=arcname_db)
+            total = len(files) + 1
+            log.info("wrote snapshot %s (%d files, via sqlite backup)", out_path, total)
+            prune(cfg)
+            return out_path
+        except Exception:
+            with contextlib.suppress(OSError):
+                out_path.unlink()
+            raise
+        finally:
+            with contextlib.suppress(OSError):
+                if temp_backup.exists():
+                    temp_backup.unlink()
 
     files = list(_candidate_files(data_dir, db_path))
     if not files:
         raise FileNotFoundError(f"no backup-eligible files found under {data_dir}")
-    with tarfile.open(out_path, "w:gz") as tar:
-        for f in files:
-            arcname = f.relative_to(data_dir) if data_dir in f.parents or f == data_dir else f.name
-            tar.add(f, arcname=str(arcname))
+    try:
+        with tarfile.open(out_path, "w:gz") as tar:
+            for f in files:
+                tar.add(f, arcname=_arcname(f, data_dir))
+    except Exception:
+        with contextlib.suppress(OSError):
+            out_path.unlink()
+        raise
     log.info("wrote snapshot %s (%d files)", out_path, len(files))
     prune(cfg)
     return out_path

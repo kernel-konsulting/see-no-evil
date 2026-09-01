@@ -149,7 +149,9 @@ const (
 var inspectionSem = make(chan struct{}, 50)
 
 // privatePrefixes are the IP ranges that must never be dialed by the proxy
-// (SSRF denylist). Covers loopback, RFC1918, link-local, and ULA/CG-NAT-ish.
+// (SSRF denylist). Covers loopback, RFC1918, link-local, ULA, CGNAT,
+// benchmark nets and unspecified. Fail-closed: any resolution to these ranges
+// blocks, and DNS errors during verification also block when FailClosed=true.
 var privatePrefixes = func() []netip.Prefix {
 	must := func(s string) netip.Prefix {
 		p, err := netip.ParsePrefix(s)
@@ -159,22 +161,49 @@ var privatePrefixes = func() []netip.Prefix {
 		return p
 	}
 	return []netip.Prefix{
+		must("0.0.0.0/8"),
 		must("127.0.0.0/8"),
 		must("10.0.0.0/8"),
 		must("172.16.0.0/12"),
 		must("192.168.0.0/16"),
 		must("169.254.0.0/16"),
+		must("100.64.0.0/10"),
+		must("198.18.0.0/15"),
+		must("192.0.2.0/24"),
+		must("198.51.100.0/24"),
+		must("203.0.113.0/24"),
+		must("224.0.0.0/4"),
 		must("fd00::/8"),
 		must("fe80::/10"),
 		must("::1/128"),
+		must("::ffff:0:0/96"),
+		must("::/128"),
 	}
 }()
 
+func addrIsBlocked(a netip.Addr) bool {
+	// Unmap IPv4-mapped IPv6 first (e.g. ::ffff:127.0.0.1 -> 127.0.0.1)
+	a = a.Unmap()
+	if !a.IsValid() {
+		return false
+	}
+	if a.IsUnspecified() {
+		return true
+	}
+	for _, p := range privatePrefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	if a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() {
+		return true
+	}
+	return false
+}
+
 // isPrivateIP reports whether host (which may include a port) is an IP literal
-// inside the denylisted private ranges. Hostnames (e.g. "api", "example.com")
-// return false — they are checked via DNS resolution in the DialContext wrapper
-// where feasible. Used to reject SSRF attempts such as "127.0.0.1:8000" or
-// "192.168.1.1".
+// inside the denylisted private ranges. Hostnames return false — they are checked
+// via DNS resolution in secureDial/handlePlainHTTP/tunnel where feasible.
 func isPrivateIP(host string) bool {
 	h := strings.TrimSpace(host)
 	if h == "" {
@@ -188,19 +217,27 @@ func isPrivateIP(host string) bool {
 	if err != nil {
 		return false
 	}
-	// Explicit prefix checks (covers all listed CIDRs even if Go's IsPrivate
-	// semantics change).
-	for _, p := range privatePrefixes {
-		if p.Contains(addr) {
-			return true
+	return addrIsBlocked(addr)
+}
+
+// hostResolvesToBlocked reports whether hostname resolves to a blocked IP.
+// Returns (blocked, checked). If checked is false, DNS failed/timed out.
+// Caller should fail-closed when checked==false and FailClosed is true.
+func hostResolvesToBlocked(ctx context.Context, host string) (bool, bool) {
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return false, false
+	}
+	for _, a := range addrs {
+		if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
+			if addrIsBlocked(nip) {
+				return true, true
+			}
 		}
 	}
-	// Fallback to stdlib helpers for any additional private space (e.g.
-	// IsPrivate covers 10/8 etc., IsLoopback covers 127/8 and ::1, IsLinkLocalUnicast covers 169.254/16 and fe80::/10)
-	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() {
-		return true
-	}
-	return false
+	return false, true
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +267,7 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 
 func (rl *rateLimiter) allow(ip string) bool {
 	if ip == "" {
-		return true
+		ip = "unknown"
 	}
 	now := time.Now()
 	rl.mu.Lock()
@@ -276,20 +313,14 @@ func NewHandler(cfg Config) *Handler {
 		trimmed := strings.Trim(host, "[]")
 		if _, err := netip.ParseAddr(trimmed); err != nil {
 			// Hostname — resolve and check if it points to a private IP.
-			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			defer cancel()
-			if addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host); err == nil {
-				for _, a := range addrs {
-					if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
-						for _, p := range privatePrefixes {
-							if p.Contains(nip) {
-								return nil, fmt.Errorf("blocked private IP dial (resolved %s -> %s): %s", host, nip.String(), addr)
-							}
-						}
-						if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
-							return nil, fmt.Errorf("blocked private IP dial (resolved %s -> %s): %s", host, nip.String(), addr)
-						}
-					}
+			blocked, ok := hostResolvesToBlocked(ctx, host)
+			if blocked {
+				return nil, fmt.Errorf("blocked private IP dial (resolved %s): %s", host, addr)
+			}
+			if !ok {
+				// DNS lookup failed/timed out; fail-closed when FailClosed=true
+				if cfg.FailClosed {
+					return nil, fmt.Errorf("blocked private IP dial (dns lookup failed for %s): %s", host, addr)
 				}
 			}
 		}
@@ -302,7 +333,7 @@ func NewHandler(cfg Config) *Handler {
 		blockedYouTubeVideos: make(map[string]blockedYouTubeVideo),
 		limiter:              newRateLimiter(100, time.Second),
 		transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			Proxy:                 nil,
 			DialContext:           secureDial,
 			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -430,6 +461,7 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Also check resolved hostnames that may map to private IPs via DNS.
 	// This catches service names like "api:8000" that resolve to Podman/Docker bridge IPs.
+	// Fail-closed when FailClosed=true and DNS lookup fails.
 	for _, host := range []string{r.Host, r.URL.Host} {
 		if host == "" {
 			continue
@@ -442,28 +474,17 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 		if _, err := netip.ParseAddr(hh); err == nil {
 			continue // already handled literal case above
 		}
-		if hh == "" || strings.Contains(hh, ".") && net.ParseIP(hh) != nil {
+		if hh == "" {
 			continue
 		}
-		// Hostname — opportunistic DNS check with short timeout.
-		lookupCtx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
-		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, hh)
-		cancel()
-		if err == nil {
-			for _, a := range addrs {
-				if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
-					for _, p := range privatePrefixes {
-						if p.Contains(nip) {
-							http.Error(w, "Forbidden", http.StatusForbidden)
-							return
-						}
-					}
-					if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
-						http.Error(w, "Forbidden", http.StatusForbidden)
-						return
-					}
-				}
-			}
+		blocked, ok := hostResolvesToBlocked(r.Context(), hh)
+		if blocked {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if !ok && h.cfg.FailClosed {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
 		}
 	}
 
@@ -685,22 +706,32 @@ func (h *Handler) decide(
 				"scores", result.Scores,
 				"bytes", len(respBody),
 			)
-			if isVideoSamplerFailure(result.Reason) {
+			// Zero frames: treat as classification failure, respect FailClosed.
+			if result.FramesScored == 0 && result.Reason == "video_sampler:no_frames" {
 				if h.cfg.FailClosed {
+					reason := "classifier:video:no_frames"
+					_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+					return "block", reason, nil
+				}
+				// Fail-open: allow through when FailClosed is false.
+			} else {
+				if isVideoSamplerFailure(result.Reason) {
+					if h.cfg.FailClosed {
+						reason := classifierBlockReason("video", result.Reason, result.Scores)
+						_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
+						return "block", reason, nil
+					}
+					// Fail-open: un-inspectable video (DRM, exotic codec, empty
+					// stream) is allowed through rather than breaking streaming.
+				}
+				if result.Action.String() == "ACTION_BLOCK" {
+					// We don't have a frame thumbnail returned by the sampler today;
+					// the quarantine UI will show the placeholder. (Returning a frame
+					// in the proto is tracked for a future iteration.)
 					reason := classifierBlockReason("video", result.Reason, result.Scores)
 					_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
 					return "block", reason, nil
 				}
-				// Fail-open: un-inspectable video (DRM, exotic codec, empty
-				// stream) is allowed through rather than breaking streaming.
-			}
-			if result.Action.String() == "ACTION_BLOCK" {
-				// We don't have a frame thumbnail returned by the sampler today;
-				// the quarantine UI will show the placeholder. (Returning a frame
-				// in the proto is tracked for a future iteration.)
-				reason := classifierBlockReason("video", result.Reason, result.Scores)
-				_ = h.auditDecide(ctx, r, ct, scores, "block", reason, "")
-				return "block", reason, nil
 			}
 		}
 	}
@@ -870,29 +901,51 @@ func (h *Handler) inspectText(
 	blockReason := ""
 	requestID := r.Header.Get("X-Request-Id")
 
+	// Budget overall inspection to 10s to avoid 192s serial stall.
+	parentCtx, parentCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer parentCancel()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	failed := false
 	for _, seg := range segments {
-		tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		res, err := h.cfg.Classifiers.ClassifyText(tctx, seg.Text, requestID)
-		cancel()
-		if err != nil {
-			slog.Warn("text classifier error", "err", err, "path", seg.Path)
-			classifierErrors.WithLabelValues("text").Inc()
-			if failClosed {
-				return "block", "classifier:text:unavailable", maxScores, nil
+		seg := seg
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			tctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
+			res, err := h.cfg.Classifiers.ClassifyText(tctx, seg.Text, requestID)
+			cancel()
+			if err != nil {
+				slog.Warn("text classifier error", "err", err, "path", seg.Path)
+				classifierErrors.WithLabelValues("text").Inc()
+				if failClosed {
+					mu.Lock()
+					failed = true
+					mu.Unlock()
+				}
+				return
 			}
-			continue
-		}
-		for k, v := range res.Scores {
-			if v > maxScores[k] {
-				maxScores[k] = v
+			mu.Lock()
+			defer mu.Unlock()
+			for k, v := range res.Scores {
+				if v > maxScores[k] {
+					maxScores[k] = v
+				}
 			}
-		}
-		if res.Action.String() == "ACTION_BLOCK" || res.Scores["nsfw"] >= threshold {
-			flagged[seg.Text] = true
-			if blockReason == "" {
-				blockReason = classifierBlockReason("text", res.Reason, res.Scores)
+			if res.Action.String() == "ACTION_BLOCK" || res.Scores["nsfw"] >= threshold {
+				flagged[seg.Text] = true
+				if blockReason == "" {
+					blockReason = classifierBlockReason("text", res.Reason, res.Scores)
+				}
 			}
-		}
+		}()
+	}
+	wg.Wait()
+	if failed && failClosed {
+		return "block", "classifier:text:unavailable", maxScores, nil
 	}
 
 	if len(flagged) == 0 {
@@ -1106,42 +1159,75 @@ func isYouTubeThumbnailHost(host string) bool {
 // ---------------------------------------------------------------------------
 
 func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
-	// SSRF denylist: refuse to tunnel to private IPs.
+	// SSRF denylist: refuse to tunnel to private IPs. Resolve once and dial IPs directly to avoid rebinding.
 	if isPrivateIP(addr) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	// Hostname that resolves to private IP must also be blocked.
 	hostOnly := addr
 	if hh, _, err := net.SplitHostPort(addr); err == nil {
 		hostOnly = hh
 	}
 	trimmed := strings.Trim(hostOnly, "[]")
 	if _, err := netip.ParseAddr(trimmed); err != nil {
-		lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, hostOnly)
-		cancel()
-		if err == nil {
-			for _, a := range addrs {
-				if nip, err := netip.ParseAddr(a.IP.String()); err == nil {
-					for _, p := range privatePrefixes {
-						if p.Contains(nip) {
-							http.Error(w, "Forbidden", http.StatusForbidden)
-							return
-						}
-					}
-					if nip.IsPrivate() || nip.IsLoopback() || nip.IsLinkLocalUnicast() {
-						http.Error(w, "Forbidden", http.StatusForbidden)
-						return
-					}
-				}
-			}
+		blocked, ok := hostResolvesToBlocked(r.Context(), hostOnly)
+		if blocked {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if !ok && h.cfg.FailClosed {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
 		}
 	}
-	upstream, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		http.Error(w, "tunnel dial failed", http.StatusBadGateway)
-		return
+	// Use secureDial via baseDialer to avoid DNS rebinding between check and DialTimeout.
+	// Resolve host to IPs ourselves and dial each with verification to ensure no private IP.
+	var upstream net.Conn
+	var dialErr error
+	if _, err := netip.ParseAddr(trimmed); err == nil {
+		// IP literal already validated, direct dial
+		upstream, dialErr = net.DialTimeout("tcp", addr, 10*time.Second)
+	} else {
+		// Hostname: resolve and dial verified IPs one by one
+		lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		addrs, lerr := net.DefaultResolver.LookupIPAddr(lookupCtx, hostOnly)
+		cancel()
+		if lerr != nil || len(addrs) == 0 {
+			if h.cfg.FailClosed {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			http.Error(w, "tunnel dial failed", http.StatusBadGateway)
+			return
+		}
+		port := ""
+		if _, p, err := net.SplitHostPort(addr); err == nil {
+			port = p
+		}
+		for _, a := range addrs {
+			if nip, err := netip.ParseAddr(a.IP.String()); err == nil && addrIsBlocked(nip) {
+				continue
+			}
+			target := net.JoinHostPort(a.IP.String(), port)
+			if port == "" {
+				target = a.IP.String()
+			}
+			c, err := net.DialTimeout("tcp", target, 10*time.Second)
+			if err == nil {
+				upstream = c
+				dialErr = nil
+				break
+			}
+			dialErr = err
+		}
+		if upstream == nil {
+			if dialErr != nil {
+				http.Error(w, "tunnel dial failed", http.StatusBadGateway)
+			} else {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+			}
+			return
+		}
 	}
 	defer func() { _ = upstream.Close() }()
 
@@ -1158,17 +1244,15 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 
-	// Apply 2-minute deadlines to avoid hanging tunnels (F11).
+	// Apply deadlines and respect client cancellation.
 	_ = upstream.SetDeadline(time.Now().Add(2 * time.Minute))
 	_ = clientConn.SetDeadline(time.Now().Add(2 * time.Minute))
 	defer func() {
 		_ = upstream.SetDeadline(time.Time{})
 		_ = clientConn.SetDeadline(time.Time{})
 	}()
-	// Context to allow future cancellation (ties to request context).
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	_ = ctx
 
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
@@ -1176,11 +1260,25 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
-		done <- struct{}{}
+		select {
+		case done <- struct{}{}:
+		case <-ctx.Done():
+		}
 	}
 	go cp(upstream, clientConn)
 	go cp(clientConn, upstream)
-	for i := 0; i < 2; i++ {
+	select {
+	case <-done:
+		<-done
+	case <-ctx.Done():
+		_ = upstream.Close()
+		_ = clientConn.Close()
+		<-done
+		<-done
+	case <-r.Context().Done():
+		_ = upstream.Close()
+		_ = clientConn.Close()
+		<-done
 		<-done
 	}
 }
@@ -1327,6 +1425,24 @@ func hasImageMagic(body []byte) bool {
 	return false
 }
 
+func hasVideoMagic(body []byte) bool {
+	if len(body) < 12 {
+		return false
+	}
+	// MP4 ftyp at offset 4
+	if string(body[4:8]) == "ftyp" {
+		return true
+	}
+	// Quick scan for moov/mdat within first 1KiB
+	limit := min(1024, len(body))
+	for i := 0; i+4 <= limit; i++ {
+		if string(body[i:i+4]) == "moov" || string(body[i:i+4]) == "mdat" {
+			return true
+		}
+	}
+	return false
+}
+
 // peekBody reads up to limit bytes from rc and returns the snapshot plus a
 // new io.ReadCloser that replays the full body (snapshot + remainder).
 //
@@ -1351,14 +1467,16 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	limit = capped(limit, hardMaxVideo)
 	snap, err := io.ReadAll(io.LimitReader(rc, limit))
 	if err != nil {
-		// On read error (e.g. truncated chunked encoding) preserve the remainder
-		// so the proxied response still streams correctly (F18). We still metric/log.
 		slog.Warn("peekBody read error", "err", err, "bytes", len(snap))
 		peekBodyErrors.Inc()
 		if snap == nil {
 			snap = []byte{}
 		}
-		return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
+		// Drain the errored body to avoid leaking the underlying connection,
+		// then replay only what we successfully read.
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+		return snap, io.NopCloser(bytes.NewReader(snap))
 	}
 	return snap, io.NopCloser(io.MultiReader(bytes.NewReader(snap), rc))
 }
@@ -1399,45 +1517,27 @@ func shouldInspect(ct string) bool {
 // shouldInspectWithBody falls back to magic-byte sniffing when the server
 // lies about Content-Type (e.g. NSFW JPEG served as application/octet-stream).
 // This defends the bypass where attacker sets generic CT to skip classifiers (#3).
-// Now sniffs all non-inspected types for image magic (F07) rather than a
-// small whitelist, and keeps HTML/JSON sniff for formerly-generic types.
+// Now sniffs all non-inspected types for image/video magic and checks
+// effectiveIsText for any CT to close text/plain and pdf bypasses.
 func shouldInspectWithBody(ct string, body []byte) bool {
 	if shouldInspect(ct) {
 		return true
 	}
-	// CT spoof defence: any type that hides an image should be inspected (F07).
-	if hasImageMagic(body) {
+	// CT spoof defence: any type that hides an image or video should be inspected.
+	if hasImageMagic(body) || hasVideoMagic(body) {
 		return true
 	}
-	// Generic / missing / misleading content-types -> additional sniff for HTML/JSON.
-	ct = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
-	if ct == "" || ct == "application/octet-stream" || ct == "application/binary" ||
-		ct == "text/plain" || ct == "binary/octet-stream" ||
-		ct == "application/octet-stream; charset=binary" {
-		// HTML sniff
-		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
-		if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
-			strings.HasPrefix(trimmed, "<head") {
-			return true
-		}
-		// JSON sniff
-		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-			return true
-		}
-		// Also treat generic that looks like text as inspectable (F02)
-		if effectiveIsText(ct, body) {
-			return true
-		}
-	} else {
-		// For all other types, still check HTML/JSON sniff as text may be hidden.
-		trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
-		if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
-			strings.HasPrefix(trimmed, "<head") {
-			return true
-		}
-		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-			return true
-		}
+	trimmed := strings.TrimSpace(strings.ToLower(string(body[:min(512, len(body))])))
+	if strings.HasPrefix(trimmed, "<!doctype") || strings.HasPrefix(trimmed, "<html") ||
+		strings.HasPrefix(trimmed, "<head") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return true
+	}
+	// Text fallback for any CT (covers application/pdf, msword etc. with masqueraded text)
+	if effectiveIsText(ct, body) {
+		return true
 	}
 	return false
 }
@@ -1459,8 +1559,6 @@ func effectiveIsText(ct string, body []byte) bool {
 	if textextract.IsSupported(ct) {
 		return true
 	}
-	// Explicit text/* fallback (covers text/plain, text/css, etc. even if
-	// IsSupported is out of sync) (F02).
 	lowCT := strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
 	if strings.HasPrefix(lowCT, "text/") {
 		return true
@@ -1473,9 +1571,21 @@ func effectiveIsText(ct string, body []byte) bool {
 		strings.HasPrefix(trimmed, "<head") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		return true
 	}
-	// Printable-ratio fallback: text/plain bypass defence. If the body is
-	// mostly printable ASCII, treat it as text that should be inspected.
-	sample := body[:min(1024, len(body))]
+	// Printable-ratio fallback with head+tail sampling to defeat binary-prefix padding.
+	// Checks both head and tail windows so attacker cannot hide behind leading nulls.
+	sampleSize := min(1024, len(body))
+	head := body[:sampleSize]
+	tail := body[min(len(body)-sampleSize, max(0, len(body)-sampleSize)):]
+	// If body is larger than 2*sampleSize, sample both; otherwise head already covers
+	sample := head
+	if len(body) > sampleSize*2 {
+		combined := make([]byte, 0, sampleSize*2)
+		combined = append(combined, head...)
+		combined = append(combined, tail...)
+		sample = combined
+	} else if len(body) > sampleSize {
+		sample = body // small body, check all
+	}
 	if isPrintableText(sample) {
 		return true
 	}
