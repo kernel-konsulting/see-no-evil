@@ -4,6 +4,7 @@
 #
 # Profiles:
 #   core              api + ui + dns + proxy + classifiers + updater (default)
+#   opa               OPA policy sidecar (use with core: --profile core --profile opa)
 #   scanner           + the optional nmap-based device scanner
 #   gpu               classifiers swapped for CUDA-enabled images
 #   redis             swap embedded cache for Redis
@@ -259,6 +260,31 @@ services:
     networks: [edge]
     volumes:
       - data:/data
+
+  # -------------------------------------------------------------------------
+  # opa profile (optional) — OPA policy sidecar for M2.1
+  # Enable with: docker compose --profile core --profile opa up -d
+  # and set policy.engine: opa|auto in /data/config.yaml
+  # -------------------------------------------------------------------------
+  opa:
+    profiles: [opa]
+    image: openpolicyagent/opa:0.68.0-static
+    restart: unless-stopped
+    networks: [internal]
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--bundle"
+      - "/policies"
+    volumes:
+      - ../../policies:/policies:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
 
   # -------------------------------------------------------------------------
   # scanner profile (optional)

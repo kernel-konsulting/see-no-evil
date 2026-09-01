@@ -21,7 +21,7 @@
 | M1.5 | First-run install wizard (`sne-setup`), compose healthchecks, CA distribution endpoints | ✅ done |
 | M1.6 | Scanner (nmap discovery, token-authenticated), observability profile (Vector + VictoriaMetrics + Grafana + vmalert + cAdvisor) | ✅ done |
 | M2 | URL/keyword filter, SafeSearch polish, YouTube channel allow/deny | ✅ done |
-| M2.1 | OPA policy engine wiring — `policies/seenoevil.rego` is CI-tested but the API still runs the Python engine; wire OPA in or remove the rego | 🟡 partial |
+| M2.1 | OPA policy engine wiring — `policies/seenoevil.rego` is CI-tested but the API still runs the Python engine; wire OPA in or remove the rego | ✅ done — OPA sidecar `openpolicyagent/opa:0.68.0-static` on `internal`, `policy.engine: python\|opa\|auto` (default `python`), parity harness 34 cases, `podman --profile core --profile opa` validated |
 | M3 | Quarantine queue (allow/deny/flag/bulk, blurred previews) | ✅ done |
 | M4 | Text inspection modes (`off` / `block` / `strip`) | ✅ done |
 | M5 | Video sampler (ffmpeg frame extraction, worst-frame verdict, concurrency-bounded) | ✅ done |
@@ -37,7 +37,7 @@
 
 ## Open sub-items (tracked)
 
-- [ ] Wire OPA (`policies/seenoevil.rego`) into `/v1/decide`, or delete the rego (keep one policy engine).
+- [x] Wire OPA (`policies/seenoevil.rego`) into `/v1/decide` — done via sidecar + `policy_opa.py` (M2.1).
 - [ ] Uncomment + validate the `backup` / `litestream` compose profiles.
 - [ ] `vpn-wg` (wg-easy) profile: decide and document; Tailscale profile ships enabled.
 - [x] Whole-codebase review hardening — all P0/P1/P2 findings triaged and fixed (G1-G6). Remaining P3 are residual/advisory and tracked in audit backlog.

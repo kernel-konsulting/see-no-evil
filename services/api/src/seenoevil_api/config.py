@@ -309,6 +309,27 @@ class BackupConfig(_Base):
     retention: int = 14
 
 
+class PolicyConfig(_Base):
+    """Policy engine selection for /v1/decide.
+
+    * ``python`` — in-tree ``policy.py`` engine (default, M1.1).
+    * ``opa`` — OPA sidecar at ``opa_url``; request fails if sidecar unreachable.
+    * ``auto`` — OPA primary, fall back to ``python`` on error/timeout.
+    """
+
+    engine: Literal["python", "opa", "auto"] = "python"
+    opa_url: str = "http://opa:8181"
+    opa_timeout_ms: int = 1500
+
+    @model_validator(mode="after")
+    def _check(self) -> PolicyConfig:
+        if self.engine in ("opa", "auto") and not self.opa_url:
+            raise ValueError("policy.opa_url is required when policy.engine is 'opa' or 'auto'")
+        if self.opa_timeout_ms <= 0:
+            raise ValueError("policy.opa_timeout_ms must be positive")
+        return self
+
+
 class LitestreamConfig(_Base):
     enabled: bool = False
     replica_url: str | None = None  # e.g. s3://bucket/path
@@ -327,6 +348,7 @@ class AppConfig(_Base):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     classifiers: ClassifiersConfig = Field(default_factory=ClassifiersConfig)
     proxy: ProxyAPIConfig = Field(default_factory=ProxyAPIConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     profiles: list[ProfileConfig] = Field(default_factory=list)
     devices: DevicesConfig = Field(default_factory=DevicesConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
@@ -380,6 +402,25 @@ def normalize_mac(mac: str) -> str:
 CONFIG_ENV_VAR = "SEENOEVIL_CONFIG"
 
 
+def _env_policy_overrides(cfg: AppConfig) -> AppConfig:
+    """Apply SEENOEVIL_OPA_URL / OPA_ADDR / SEENOEVIL_POLICY_ENGINE env overrides."""
+    import contextlib
+
+    env_engine = os.environ.get("SEENOEVIL_POLICY_ENGINE") or os.environ.get("POLICY_ENGINE")
+    env_url = os.environ.get("SEENOEVIL_OPA_URL") or os.environ.get("OPA_ADDR")
+    if env_engine:
+        v = env_engine.strip().lower()
+        if v in ("python", "opa", "auto"):
+            cfg.policy.engine = v  # type: ignore[assignment]
+    if env_url:
+        cfg.policy.opa_url = env_url.strip()
+    env_timeout = os.environ.get("SEENOEVIL_OPA_TIMEOUT_MS") or os.environ.get("OPA_TIMEOUT_MS")
+    if env_timeout:
+        with contextlib.suppress(ValueError):
+            cfg.policy.opa_timeout_ms = int(env_timeout.strip())
+    return cfg
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
     """Load and validate ``config.yaml`` from ``path`` (or ``$SEENOEVIL_CONFIG``).
 
@@ -390,6 +431,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
         env_path = os.environ.get(CONFIG_ENV_VAR)
         if not env_path:
             cfg = AppConfig()
+            cfg = _env_policy_overrides(cfg)
             if not cfg.proxy.api_token and not os.environ.get("SEENOEVIL_PROXY_TOKEN"):
                 log.warning("proxy.api_token not configured — /v1/decide will 503")
             return cfg
@@ -407,6 +449,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AppConfig:
             raise FileNotFoundError(f"config file not found: {p}")
     raw: dict[str, Any] = yaml.safe_load(p.read_text()) or {}
     cfg = AppConfig.model_validate(raw)
+    cfg = _env_policy_overrides(cfg)
     if not cfg.proxy.api_token and not os.environ.get("SEENOEVIL_PROXY_TOKEN"):
         log.warning("proxy.api_token not configured — /v1/decide will 503")
     if not cfg.scanner.api_token and not os.environ.get("SCANNER_API_TOKEN"):

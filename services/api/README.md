@@ -132,10 +132,15 @@ SQLite (default) or PostgreSQL via the same `db.url`.
 - **Auth:** JWT rotated on password change (F14), `ensure_secret`/`_ensure_jwt_secret` catch `IntegrityError` + `GET /v1/audit` read-only (F19), OIDC issuer/https + `token_endpoint` host validation + `Secure` via `_secure_cookies` + single-use state (F15/F17/F26), last-admin patch guard (F35).
 - **Remaining polish:** quarantine bulk returns `skipped_expired` (F22), settings patch type-checked (F24), scanner CIDR via `ip_network` strict=False (F28), video zero-frames → `block` (F29), SafeSearch `google.` TLD (F36), hard caps doc sync (F32), policy.proto deprecated note (F33).
 
-**Deferred to follow-up M1 PRs:**
+**M2.1 — OPA sidecar (new):**
 
-- OPA / rego integration (the in-tree policy engine has the same interface,
-  so the swap is local to `policy.py`).
+- `policy.engine: python | opa | auto` in `config.yaml` (default `python`); `auto` is OPA-primary with Python fallback on error/timeout.
+- OPA runs as `openpolicyagent/opa:0.68.0-static` sidecar on `internal` (`--bundle /policies`, `:8181`), ro-mounted `policies/`.
+- `POST /v1/decide` builds OPA input via `policy_opa.build_opa_input` (host, path_query, url_text, youtube_channel, classifier_scores, thresholds, global_rules) and POSTs to `opa:8181/v1/data/seenoevil/policy/decision`; on `auto` failures fall back to Python and increment `seenoevil_opa_fallback_total`.
+- Rego (`policies/seenoevil.rego`) now mirrors Python canonical (global rules, enforce_allowlist gating, `_NON_BLOCKING` labels, threshold fallback `profile > global > config`, reason suffixes).
+
+**Deferred:**
+
 - WebAuthn (config knobs are present and validated; not consumed).
 
 ## Local development

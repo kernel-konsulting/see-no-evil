@@ -145,7 +145,10 @@ Enforced by:
 - **gRPC between proxy and classifiers** — streaming, well-typed, easy to swap
   classifier implementations later.
 - **OPA for policy** — declarative, testable (`opa test`), externally
-  reviewable. Avoids hand-rolling a rules engine.
+  reviewable. Wired as an `openpolicyagent/opa:0.68.0-static` sidecar on the
+  `internal` network (`--bundle /policies`, `http://opa:8181`); API selects
+  engine via `policy.engine: python | opa | auto` (default `python`, `auto`
+  falls back to Python).
 - **SQLite default** — one file, no daemon, fast enough for ~50 devices.
   Postgres swap is one config line.
 - **Embedded cache default** — there is no good reason a single-replica home
