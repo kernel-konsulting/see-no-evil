@@ -57,9 +57,9 @@ export default function App() {
               <Route
                 path="quarantine"
                 element={
-                  <AdminRoute>
+                  <PrivateRoute>
                     <Quarantine />
-                  </AdminRoute>
+                  </PrivateRoute>
                 }
               />
               <Route path="audit" element={<AuditLog />} />

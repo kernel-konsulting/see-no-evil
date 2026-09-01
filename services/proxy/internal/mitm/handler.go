@@ -142,11 +142,15 @@ const (
 	hardMaxVideo = 500 << 20
 )
 
-// inspectionSem bounds concurrent inspection buffers to avoid OOM (F05).
-// Each active inspection can hold up to hardMaxVideo / hardMaxImage; capping
-// concurrency to 50 keeps worst-case heap ~ 1 GiB (50*20MiB) for sniff path
-// plus video path via 500MiB bounded by per-type cap and timeout.
+// inspectionSem bounds concurrent non-video inspection buffers to avoid OOM (F05).
+// Worst-case heap: inspectionSem 50*20MiB ~1 GiB for image/sniff path
+// plus videoSem 4*500MiB =2 GiB for video path => ~3 GiB total.
 var inspectionSem = make(chan struct{}, 50)
+
+// videoSem bounds concurrent video inspections separately to avoid 25 GiB heap
+// (50*500MiB). Capping video concurrency to 4 keeps worst-case video heap
+// 4*500MiB=2 GiB.
+var videoSem = make(chan struct{}, 4)
 
 // privatePrefixes are the IP ranges that must never be dialed by the proxy
 // (SSRF denylist). Covers loopback, RFC1918, link-local, ULA, CGNAT,
@@ -579,6 +583,9 @@ func (h *Handler) handlePlainHTTP(w http.ResponseWriter, r *http.Request) {
 			"client_ip", ip,
 			"reason", reason,
 		)
+		// Drain peekBody's MultiReader tail so the Transport can reuse the
+		// connection (otherwise the unread remainder would leak the conn).
+		_, _ = io.Copy(io.Discard, resp.Body)
 		writeBlockedResponse(w, r.URL.String(), reason, respCT, respBodySnap)
 		return
 	}
@@ -1453,19 +1460,28 @@ func hasVideoMagic(body []byte) bool {
 // limit==0 falls back to 10 MiB; for an explicit "send everything" pass a
 // very large value (e.g. math.MaxInt64). io.ReadAll grows its buffer
 // dynamically, so a huge limit doesn't pre-allocate. Concurrency is bounded
-// by inspectionSem to avoid OOM (F05): if the semaphore is full we cap
-// large limits to hardMaxImage for the sniff path.
+// to avoid OOM (F05):
+//   - image/sniff path via inspectionSem 50*20MiB ~1 GiB
+//   - video path via videoSem 4*500MiB=2 GiB (fallback to hardMaxImage when full)
 func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 	if limit <= 0 {
 		limit = 10 << 20
 	}
-	// Bound concurrency: if too many inspections are active, shrink large buffers.
-	select {
-	case inspectionSem <- struct{}{}:
-		defer func() { <-inspectionSem }()
-	default:
-		if limit > hardMaxImage {
+	// Bound concurrency: video path uses videoSem (4 slots), other paths use
+	// inspectionSem. If the relevant semaphore is full, cap large buffers to
+	// hardMaxImage like the sniff path.
+	if limit > hardMaxImage {
+		select {
+		case videoSem <- struct{}{}:
+			defer func() { <-videoSem }()
+		default:
 			limit = hardMaxImage
+		}
+	} else {
+		select {
+		case inspectionSem <- struct{}{}:
+			defer func() { <-inspectionSem }()
+		default:
 		}
 	}
 	limit = capped(limit, hardMaxVideo)
@@ -1490,7 +1506,7 @@ func peekBody(rc io.ReadCloser, limit int64) ([]byte, io.ReadCloser) {
 // even when configured to unlimited. For generic/unknown CTs we cap to
 // hardMaxImage for sniffing (20 MiB) to avoid 500 MiB per-request OOM (F05);
 // video path already has its own hardMaxVideo cap and is bounded by
-// inspectionSem concurrency.
+// videoSem concurrency (4*500MiB=2GiB).
 func (h *Handler) limitFor(ct string) int64 {
 	switch {
 	case isImage(ct) && h.cfg.MaxImageBytes > 0:
@@ -1506,8 +1522,13 @@ func (h *Handler) limitFor(ct string) int64 {
 		if h.cfg.MaxImageBytes > 0 {
 			return capped(h.cfg.MaxImageBytes, hardMaxImage)
 		}
+		return hardMaxImage
 	}
-	return capped(h.cfg.MaxInspectBytes, hardMaxImage)
+	// All other generic CTs also use bounded sniff cap.
+	if h.cfg.MaxInspectBytes > 0 {
+		return capped(h.cfg.MaxInspectBytes, hardMaxImage)
+	}
+	return hardMaxImage
 }
 
 // ---------------------------------------------------------------------------

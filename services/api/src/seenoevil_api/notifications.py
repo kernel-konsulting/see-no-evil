@@ -15,15 +15,63 @@ so the policy decision never blocks on the network.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from .config import NotificationsConfig
 
 log = logging.getLogger("seenoevil_api.notifications")
+
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd00::/8"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("::1/128"),
+]
+
+
+def is_private_url(url: str) -> bool:
+    """Return True if *url* targets a private/loopback/link-local address.
+
+    Mirrors the SSRF denylist used in ``routers/settings.py`` and the Go proxy.
+    Hostnames that are not IP literals are considered public (no DNS lookup);
+    only ``localhost`` is treated as private for hostnames.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return False
+        host = host.strip().lower()
+        if host == "localhost":
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped  # type: ignore[assignment]
+        for net in _PRIVATE_NETWORKS:
+            try:
+                if ip in net:
+                    return True
+            except TypeError:
+                continue
+        return False
+    except Exception:
+        return False
+
 
 # Keep original reference for test mock detection (F30)
 _ORIGINAL_POST = httpx.post
@@ -74,27 +122,33 @@ def _send_sync(cfg: NotificationsConfig, payload: dict[str, Any]) -> None:
     )
     timeout = float(cfg.timeout_seconds or 5.0)
     if cfg.ntfy_url:
-        try:
-            httpx.post(
-                cfg.ntfy_url,
-                content=body_text,
-                headers={
-                    "Title": title,
-                    "Tags": "shield,warning",
-                    "Priority": "default",
-                },
-                timeout=timeout,
-            )
-        except Exception:  # pragma: no cover - logged for ops
-            log.warning("ntfy notification failed", exc_info=True)
+        if is_private_url(cfg.ntfy_url):
+            log.warning("ntfy notification blocked: private network %s", cfg.ntfy_url)
+        else:
+            try:
+                httpx.post(
+                    cfg.ntfy_url,
+                    content=body_text,
+                    headers={
+                        "Title": title,
+                        "Tags": "shield,warning",
+                        "Priority": "default",
+                    },
+                    timeout=timeout,
+                )
+            except Exception:  # pragma: no cover - logged for ops
+                log.warning("ntfy notification failed", exc_info=True)
     if cfg.webhook_url:
-        headers = {"Content-Type": "application/json"}
-        if cfg.webhook_token:
-            headers["Authorization"] = f"Bearer {cfg.webhook_token}"
-        try:
-            httpx.post(cfg.webhook_url, json=payload, headers=headers, timeout=timeout)
-        except Exception:  # pragma: no cover - logged for ops
-            log.warning("webhook notification failed", exc_info=True)
+        if is_private_url(cfg.webhook_url):
+            log.warning("webhook notification blocked: private network %s", cfg.webhook_url)
+        else:
+            headers = {"Content-Type": "application/json"}
+            if cfg.webhook_token:
+                headers["Authorization"] = f"Bearer {cfg.webhook_token}"
+            try:
+                httpx.post(cfg.webhook_url, json=payload, headers=headers, timeout=timeout)
+            except Exception:  # pragma: no cover - logged for ops
+                log.warning("webhook notification failed", exc_info=True)
 
 
 async def _send_async(cfg: NotificationsConfig, payload: dict[str, Any]) -> None:
@@ -116,26 +170,32 @@ async def _send_async(cfg: NotificationsConfig, payload: dict[str, Any]) -> None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             if cfg.ntfy_url:
-                try:
-                    await client.post(
-                        cfg.ntfy_url,
-                        content=body_text,
-                        headers={
-                            "Title": title,
-                            "Tags": "shield,warning",
-                            "Priority": "default",
-                        },
-                    )
-                except Exception:  # pragma: no cover - logged for ops
-                    log.warning("ntfy notification failed", exc_info=True)
+                if is_private_url(cfg.ntfy_url):
+                    log.warning("ntfy notification blocked: private network %s", cfg.ntfy_url)
+                else:
+                    try:
+                        await client.post(
+                            cfg.ntfy_url,
+                            content=body_text,
+                            headers={
+                                "Title": title,
+                                "Tags": "shield,warning",
+                                "Priority": "default",
+                            },
+                        )
+                    except Exception:  # pragma: no cover - logged for ops
+                        log.warning("ntfy notification failed", exc_info=True)
             if cfg.webhook_url:
-                headers = {"Content-Type": "application/json"}
-                if cfg.webhook_token:
-                    headers["Authorization"] = f"Bearer {cfg.webhook_token}"
-                try:
-                    await client.post(cfg.webhook_url, json=payload, headers=headers)
-                except Exception:  # pragma: no cover - logged for ops
-                    log.warning("webhook notification failed", exc_info=True)
+                if is_private_url(cfg.webhook_url):
+                    log.warning("webhook notification blocked: private network %s", cfg.webhook_url)
+                else:
+                    headers = {"Content-Type": "application/json"}
+                    if cfg.webhook_token:
+                        headers["Authorization"] = f"Bearer {cfg.webhook_token}"
+                    try:
+                        await client.post(cfg.webhook_url, json=payload, headers=headers)
+                    except Exception:  # pragma: no cover - logged for ops
+                        log.warning("webhook notification failed", exc_info=True)
     except Exception:  # pragma: no cover - client init failed
         log.warning("async notification client failed", exc_info=True)
 

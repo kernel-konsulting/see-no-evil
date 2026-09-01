@@ -238,25 +238,24 @@ def finish_flow(
         if not access_token:
             raise ValueError("oidc token response missing access_token")
         # Verify nonce if id_token present and we issued one.
+        # NOTE: id_token signature verification is intentionally not performed here;
+        # we rely on access_token + userinfo for authentication. Nonce binding
+        # must still be strict (fail-closed): any id_token present must carry
+        # the exact nonce we issued.
         id_token = tokens.get("id_token")
         if saved_nonce and id_token:
             try:
-                # id_token is JWT: header.payload.sig — verify nonce in payload without
-                # signature verification (provider signature checked by provider libs
-                # when needed; we at least ensure nonce binding).
                 payload_b64 = id_token.split(".")[1]
-                # pad base64
+                # handle base64 padding correctly
                 payload_b64 += "=" * (-len(payload_b64) % 4)
                 payload_json = base64.urlsafe_b64decode(payload_b64.encode()).decode()
                 import json as _json
 
                 payload = _json.loads(payload_json)
                 token_nonce = payload.get("nonce")
-                if token_nonce is not None and token_nonce != saved_nonce:
+                if token_nonce != saved_nonce:
                     raise ValueError("oidc nonce mismatch")
             except (ValueError, IndexError, base64.binascii.Error, Exception) as exc:
-                # Nonce mismatch is security-relevant; other decode errors are logged
-                # but don't block userinfo flow if provider omits nonce.
                 if isinstance(exc, ValueError) and "nonce mismatch" in str(exc):
                     raise
                 log.debug("oidc id_token nonce check skipped: %s", exc)

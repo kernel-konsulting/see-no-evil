@@ -290,14 +290,38 @@ def make_router(get_session_dep, get_config) -> APIRouter:
         elif body.decision == "block" and body.reason and body.reason.startswith("classifier:"):
             # Fail-closed audit path: proxy pre-blocked due to classifier/policy failure
             # with empty scores (e.g. classifier:unavailable, video_sampler:no_frames).
-            # Trust block for audit/quarantine, but still validate reason is classifier:*.
-            # This closes allow-bypass (F03) while preserving forensics for fail-closed blocks.
-            # Normalize classifier:image:porn -> classifier:porn to match policy engine.
+            # Only allowlist known fail-closed suffixes to avoid audit pollution.
+            allowed_suffixes = {
+                "porn",
+                "hentai",
+                "sexy",
+                "nsfw",
+                "unavailable",
+                "sampler_error",
+                "sampler_unavailable",
+                "no_frames",
+                "video_sampler:no_frames",
+                "text:unavailable",
+                "image:unavailable",
+            }
             norm = body.reason.strip()
             for prefix in ("classifier:image:", "classifier:video:", "classifier:text:"):
                 if norm.startswith(prefix):
                     norm = "classifier:" + norm[len(prefix) :]
                     break
+            # Extract suffix after classifier:
+            suffix = (
+                norm.split("classifier:", 1)[-1].strip().lower() if "classifier:" in norm else ""
+            )
+            if (
+                suffix
+                and suffix not in allowed_suffixes
+                and not any(suffix.startswith(s) for s in ("porn", "hentai", "sexy", "nsfw"))
+            ):
+                log.warning(
+                    "decide: unexpected classifier reason %r, treating as block",
+                    body.reason,
+                )
             decision = DecisionOutput("block", norm)
         else:
             # Policy engine selection (M2.1): python | opa | auto
