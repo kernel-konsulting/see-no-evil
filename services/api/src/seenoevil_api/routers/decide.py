@@ -16,8 +16,25 @@ from ..auth import require_proxy_factory
 from ..config import AppConfig
 from ..models import AuditDecision, Device, Profile, QuarantineItem, Quota
 from ..policy import DecisionInput, DecisionOutput, GlobalRules, ProfileView, decide, now_parts
+from ..policy_opa import build_opa_input, opa_decide
 from ..quota_day import quota_day as _quota_today
 from ..schemas import DecideRequest, DecideResponse
+
+try:
+    from prometheus_client import Counter
+
+    _decide_total = Counter(
+        "seenoevil_decide_requests_total",
+        "Decide requests by engine and decision",
+        ["engine", "decision"],
+    )
+    _opa_fallback_total = Counter(
+        "seenoevil_opa_fallback_total",
+        "OPA fallback to Python (auto mode)",
+    )
+except Exception:  # pragma: no cover - metrics optional in tests
+    _decide_total = None  # type: ignore[assignment]
+    _opa_fallback_total = None  # type: ignore[assignment]
 
 log = logging.getLogger("seenoevil_api.decide")
 
@@ -283,21 +300,65 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                     break
             decision = DecisionOutput("block", norm)
         else:
-            decision = decide(
-                _profile_view(profile),
-                DecisionInput(
-                    url=body.url,
-                    content_type=body.content_type,
-                    classifier_scores=dict(body.classifier_scores),
-                    now_dow=dow,
-                    now_time=t,
-                    today=today,
-                    minutes_used_today=_minutes_used_today(session, device, today),
-                    panic_relax=False,
-                ),
-                config=config,
-                global_rules=_global_rules(session),
-            )
+            # Policy engine selection (M2.1): python | opa | auto
+            engine = getattr(getattr(config, "policy", None), "engine", "python")
+            if engine not in ("python", "opa", "auto"):
+                engine = "python"
+            decision = None  # type: ignore[assignment]
+            opa_error: Exception | None = None
+            if engine in ("opa", "auto"):
+                try:
+                    pv = _profile_view(profile)
+                    din = DecisionInput(
+                        url=body.url,
+                        content_type=body.content_type,
+                        classifier_scores=dict(body.classifier_scores),
+                        now_dow=dow,
+                        now_time=t,
+                        today=today,
+                        minutes_used_today=_minutes_used_today(session, device, today),
+                        panic_relax=False,
+                    )
+                    gr = _global_rules(session)
+                    opa_input = build_opa_input(pv, din, config=config, global_rules=gr)
+                    opa_url = getattr(config.policy, "opa_url", "http://opa:8181")
+                    opa_timeout = int(getattr(config.policy, "opa_timeout_ms", 1500))
+                    decision = opa_decide(opa_input, opa_url=opa_url, timeout_ms=opa_timeout)
+                    if _decide_total:
+                        _decide_total.labels(engine="opa", decision=decision.decision).inc()
+                except Exception as exc:  # pragma: no cover - fallback path
+                    opa_error = exc
+                    log.warning("opa decide failed (engine=%s): %s", engine, exc)
+                    if engine == "opa":
+                        raise HTTPException(
+                            status.HTTP_503_SERVICE_UNAVAILABLE,
+                            f"policy engine opa unavailable: {exc}",
+                        ) from exc
+                    if _opa_fallback_total:
+                        _opa_fallback_total.inc()
+                    # auto: fall through to python
+                    decision = None
+            if decision is None:
+                if opa_error is not None:
+                    log.info("opa fallback to python (auto mode)")
+                decision = decide(
+                    _profile_view(profile),
+                    DecisionInput(
+                        url=body.url,
+                        content_type=body.content_type,
+                        classifier_scores=dict(body.classifier_scores),
+                        now_dow=dow,
+                        now_time=t,
+                        today=today,
+                        minutes_used_today=_minutes_used_today(session, device, today),
+                        panic_relax=False,
+                    ),
+                    config=config,
+                    global_rules=_global_rules(session),
+                )
+                if _decide_total and engine in ("python", "auto"):
+                    label = "python" if engine == "python" else "fallback"
+                    _decide_total.labels(engine=label, decision=decision.decision).inc()
 
         # Bound thumbnail size before persisting to avoid unbounded Text growth
         # (#12, #41). Oversize previews are dropped rather than rejecting the
