@@ -1,0 +1,38 @@
+name: prune-cache
+
+on:
+  schedule:
+    - cron: "0 3 * * 0" # weekly Sunday 03:00 UTC — Fix #9: evict stale GHA caches (was 10.5 GB / 1107 entries)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: prune-cache
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: prune gha caches older than 7 days
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune caches via gh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Active caches before prune:"
+          gh api "repos/${{ github.repository }}/actions/cache/usage" --jq .
+          # Delete caches not accessed in last 7 days, keep most recent per scope
+          cutoff=$(date -d '7 days ago' -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff: $cutoff"
+          gh api "repos/${{ github.repository }}/actions/caches?per_page=100" --paginate --jq \
+            --arg cutoff "$cutoff" '.actions_caches[] | select(.last_accessed_at < $cutoff) | "\(.id) \(.key) \(.size_in_bytes) \(.last_accessed_at)"' \
+            | while read -r id key size last; do
+              echo "Deleting cache $id $key $size $last"
+              gh api --method DELETE "repos/${{ github.repository }}/actions/caches/$id" || true
+            done
+          echo "Active caches after prune:"
+          gh api "repos/${{ github.repository }}/actions/cache/usage" --jq .
