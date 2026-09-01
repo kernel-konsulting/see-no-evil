@@ -324,6 +324,22 @@ devices:
 
 
 # -----------------------------------------------------------------------------
+# policy — decision engine selection (M2.1)
+# -----------------------------------------------------------------------------
+policy:
+  # Engine backing POST /v1/decide.
+  #   python — in-tree policy.py (default)
+  #   opa    — OPA sidecar at opa_url; fails closed if unreachable
+  #   auto   — OPA primary, fallback to python on error/timeout
+  engine: python
+  # OPA sidecar base URL (compose service `opa:8181` on internal network).
+  # Overridden by SEENOEVIL_OPA_URL / OPA_ADDR env vars when set.
+  opa_url: http://opa:8181
+  # Per-decide timeout for OPA HTTP call.
+  opa_timeout_ms: 1500
+
+
+# -----------------------------------------------------------------------------
 # vpn — optional remote-access transport
 # -----------------------------------------------------------------------------
 vpn:

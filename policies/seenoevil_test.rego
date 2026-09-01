@@ -51,7 +51,7 @@ test_deny_domain_blocks if {
 	})
 	out := policy.decision with input as inp
 	out.decision == "block"
-	out.reason == "deny_domain"
+	out.reason == "deny_domain:tiktok.com"
 }
 
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ test_deny_keyword_blocks if {
 	})
 	out := policy.decision with input as inp
 	out.decision == "block"
-	out.reason == "deny_keyword"
+	out.reason == "deny_keyword:nsfw"
 }
 
 # ---------------------------------------------------------------------------
