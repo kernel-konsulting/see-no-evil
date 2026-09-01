@@ -1187,6 +1187,10 @@ func (h *Handler) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
 	if _, err := netip.ParseAddr(trimmed); err == nil {
 		// IP literal already validated, direct dial
 		upstream, dialErr = net.DialTimeout("tcp", addr, 10*time.Second)
+		if dialErr != nil {
+			http.Error(w, "tunnel dial failed", http.StatusBadGateway)
+			return
+		}
 	} else {
 		// Hostname: resolve and dial verified IPs one by one
 		lookupCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
