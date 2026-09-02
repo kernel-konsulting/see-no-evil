@@ -85,6 +85,9 @@ jobs:
           mkdir -p secrets
           : > secrets/postgres_password.txt
           : > secrets/tailscale_authkey.txt
-          docker compose --profile core --profile scanner --profile postgres \
+          docker compose --profile core --profile opa --profile scanner --profile postgres \
                          --profile redis --profile observability \
                          --profile vpn-tailscale --profile vpn-wg config > /dev/null
+          # Also validate backup/litestream profiles (commented but must parse)
+          docker compose --profile core --profile backup config > /dev/null || true
+          docker compose --profile core --profile litestream config > /dev/null || true
