@@ -53,6 +53,16 @@ VALID_ROLES = frozenset({ROLE_ADMIN, ROLE_VIEWER})
 _hasher = PasswordHasher()
 
 
+def _is_legacy_single_admin(session: Session) -> bool:
+    """Return True when the users table is empty (legacy single-admin mode).
+
+    When True, JWT sub from the legacy settings row is accepted without a
+    User row. When False, any JWT without a matching User must be rejected
+    (deleted user replay protection).
+    """
+    return session.scalars(select(User).limit(1)).first() is None
+
+
 # ---------------------------------------------------------------------------
 # Setting helpers
 # ---------------------------------------------------------------------------
@@ -244,8 +254,6 @@ def delete_user(session: Session, user_id: int) -> None:
     with contextlib.suppress(Exception):
         rotate_jwt_secret(session)
     session.commit()
-    with contextlib.suppress(Exception):
-        session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +421,7 @@ def require_admin_factory(get_session_dep):
         # otherwise a deleted user must be rejected (P1: JWT replay).
         user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
         if user is None:
-            has_any = session.scalars(select(User).limit(1)).first() is not None
-            if has_any:
+            if not _is_legacy_single_admin(session):
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
             return str(sub)
         if user.disabled or user.role != ROLE_ADMIN:
@@ -448,8 +455,7 @@ def current_user_factory(get_session_dep):
         user = session.scalars(select(User).where(User.email == email)).first()
         if user is None:
             # Legacy single-admin path: treat as admin only when users table empty.
-            has_any = session.scalars(select(User).limit(1)).first() is not None
-            if has_any:
+            if not _is_legacy_single_admin(session):
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
             return (email, ROLE_ADMIN)
         if user.disabled:
@@ -682,8 +688,7 @@ def require_admin_or_scanner_factory(get_session_dep, get_config):
                     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
                 user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
                 if user is None:
-                    has_any = session.scalars(select(User).limit(1)).first() is not None
-                    if has_any:
+                    if not _is_legacy_single_admin(session):
                         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
                     return str(sub)
                 if user.disabled or user.role != ROLE_ADMIN:

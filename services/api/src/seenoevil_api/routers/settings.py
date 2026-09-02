@@ -10,9 +10,7 @@ Two surfaces:
 
 from __future__ import annotations
 
-import ipaddress
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -20,54 +18,7 @@ from sqlalchemy.orm import Session
 from .. import runtime
 from ..auth import require_proxy_factory
 from ..schemas import RuntimeSettings
-
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("fd00::/8"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("::1/128"),
-]
-
-
-def is_private_url(url: str) -> bool:
-    """Return True if *url* targets a private/loopback/link-local address.
-
-    Used to block SSRF via notification webhooks. Hostnames that are not IP
-    literals are considered public (no DNS lookup at validation time); only
-    ``localhost`` is treated as private in the hostname case.
-    """
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname
-        if not host:
-            return False
-        host = host.strip().lower()
-        if host == "localhost":
-            return True
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            return False
-        # Handle IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
-        if ip.version == 6 and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped  # type: ignore[assignment]
-        for net in _PRIVATE_NETWORKS:
-            try:
-                if ip in net:
-                    return True
-            except TypeError:
-                # IPv4 vs IPv6 mismatch — skip
-                continue
-        return False
-    except Exception:
-        return False
-
+from ..ssrf import is_private_url
 
 _ALLOWED_TOP = {"inspect", "lists", "text", "image", "notifications"}
 _ALLOWED_INSPECT = {"image", "video", "text", "domain", "url"}
@@ -185,7 +136,7 @@ def _validate_patch(patch: dict[str, Any]) -> None:
                         if is_private_url(v):
                             raise HTTPException(
                                 status.HTTP_400_BAD_REQUEST,
-                                "webhook_url must not target private network",
+                                f"{k} must not target private network",
                             )
 
 

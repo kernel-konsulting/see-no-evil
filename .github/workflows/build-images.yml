@@ -89,5 +89,5 @@ jobs:
                          --profile redis --profile observability \
                          --profile vpn-tailscale --profile vpn-wg config > /dev/null
           # Also validate backup/litestream profiles (commented but must parse)
-          docker compose --profile core --profile backup config > /dev/null || true
-          docker compose --profile core --profile litestream config > /dev/null || true
+          docker compose --profile core --profile backup config > /dev/null
+          docker compose --profile core --profile litestream config > /dev/null
