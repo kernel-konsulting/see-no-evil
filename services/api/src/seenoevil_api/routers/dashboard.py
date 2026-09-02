@@ -44,7 +44,8 @@ def make_router(get_session_dep, require_user) -> APIRouter:
 
     @r.get("/stats", response_model=DashboardStats, dependencies=[Depends(require_user)])
     def stats(session: Session = Depends(get_session_dep)) -> DashboardStats:
-        now = datetime.now(UTC)
+        # Use naive UTC to match DB storage (SQLite stores naive, see models._utcnow)
+        now = datetime.now(UTC).replace(tzinfo=None)
         device_count = session.scalar(select(func.count()).select_from(Device)) or 0
         quarantine_pending = (
             session.scalar(

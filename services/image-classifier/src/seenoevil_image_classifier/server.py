@@ -124,7 +124,10 @@ Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS  # make Pillow raise, not warn
 
 def _looks_like_svg(image_bytes: bytes) -> bool:
     head = image_bytes[:512].lstrip()
-    return head.startswith(b"<svg") or b"<svg" in head[:256]
+    if head.startswith(b"<?xml"):
+        # Check for <svg within first 512 after xml decl
+        return b"<svg" in head[:512]
+    return head.startswith(b"<svg")
 
 
 def _rasterize_svg(image_bytes: bytes) -> bytes:

@@ -237,7 +237,15 @@ def delete_user(session: Session, user_id: int) -> None:
     if user is None:
         return
     session.delete(user)
+    # Invalidate any sessions for the deleted user (and as side-effect all
+    # sessions) so a stolen cookie cannot survive deletion for 4h.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        rotate_jwt_secret(session)
     session.commit()
+    with contextlib.suppress(Exception):
+        session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -401,9 +409,15 @@ def require_admin_factory(get_session_dep):
         if not sub:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
         # Block non-admin roles and disabled accounts. Legacy single-admin
-        # (no User row) defaults to admin.
+        # (no User row) defaults to admin only when the users table is empty;
+        # otherwise a deleted user must be rejected (P1: JWT replay).
         user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
-        if user is not None and (user.disabled or user.role != ROLE_ADMIN):
+        if user is None:
+            has_any = session.scalars(select(User).limit(1)).first() is not None
+            if has_any:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
+            return str(sub)
+        if user.disabled or user.role != ROLE_ADMIN:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 "user disabled" if user.disabled else "admin role required",
@@ -433,7 +447,10 @@ def current_user_factory(get_session_dep):
         email = str(sub).lower()
         user = session.scalars(select(User).where(User.email == email)).first()
         if user is None:
-            # Legacy single-admin path: treat as admin.
+            # Legacy single-admin path: treat as admin only when users table empty.
+            has_any = session.scalars(select(User).limit(1)).first() is not None
+            if has_any:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
             return (email, ROLE_ADMIN)
         if user.disabled:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "user disabled")
@@ -664,7 +681,12 @@ def require_admin_or_scanner_factory(get_session_dep, get_config):
                 if not sub:
                     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid session")
                 user = session.scalars(select(User).where(User.email == str(sub).lower())).first()
-                if user is not None and (user.disabled or user.role != ROLE_ADMIN):
+                if user is None:
+                    has_any = session.scalars(select(User).limit(1)).first() is not None
+                    if has_any:
+                        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
+                    return str(sub)
+                if user.disabled or user.role != ROLE_ADMIN:
                     raise HTTPException(
                         status.HTTP_403_FORBIDDEN,
                         "user disabled" if user.disabled else "admin role required",

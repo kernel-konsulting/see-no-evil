@@ -46,8 +46,11 @@ type ProxyConfig struct {
 	SafeSearch struct {
 		Google            bool `yaml:"google"`
 		Bing              bool `yaml:"bing"`
-		DuckDuckGo        bool `yaml:"ddg"`
+		DuckDuckGo        bool `yaml:"duckduckgo"`
 		YouTubeRestricted bool `yaml:"youtube_restricted"`
+		// Deprecated alias for DuckDuckGo; kept for backward compatibility
+		// with configs that used `ddg: true`.
+		DuckDuckGoAlias bool `yaml:"ddg"`
 	} `yaml:"safesearch"`
 
 	MaxInspectBody string `yaml:"max_inspect_body"` // legacy fallback (e.g. "10MiB")
@@ -283,6 +286,10 @@ func (r *Root) setDefaults() {
 	}
 	if r.Proxy.APIToken == "" {
 		r.Proxy.APIToken = os.Getenv("SEENOEVIL_PROXY_TOKEN")
+	}
+	// Backward-compat: `ddg` was the old key for DuckDuckGo SafeSearch.
+	if r.Proxy.SafeSearch.DuckDuckGoAlias {
+		r.Proxy.SafeSearch.DuckDuckGo = true
 	}
 }
 

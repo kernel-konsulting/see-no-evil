@@ -47,7 +47,7 @@ export interface AuditEntry {
   profile_id: number | null;
   url: string;
   content_type: string | null;
-  decision: "allow" | "block" | "warn";
+  decision: "allow" | "block";
   reason: string;
   classifier_scores: Record<string, unknown>;
   thumbnail_b64: string | null;
