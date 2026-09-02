@@ -61,6 +61,8 @@ def test_parse_nmap_output_skips_hosts_without_mac():
 def test_load_config_defaults_when_no_file(monkeypatch):
     monkeypatch.delenv("SEENOEVIL_CONFIG", raising=False)
     monkeypatch.delenv("CONFIG_PATH", raising=False)
+    # Auto-detection uses host IP (10.x on GH runners); force fallback to default for deterministic test
+    monkeypatch.setattr("seenoevil_scanner.scanner._detect_local_cidr", lambda: None)
     cfg = load_config()
     assert cfg.enabled is False
     assert cfg.cidr == "192.168.1.0/24"
