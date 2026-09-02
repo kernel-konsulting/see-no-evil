@@ -15,62 +15,16 @@ so the policy decision never blocks on the network.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
 from .config import NotificationsConfig
+from .ssrf import is_private_url
 
 log = logging.getLogger("seenoevil_api.notifications")
-
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("100.64.0.0/10"),
-    ipaddress.ip_network("fd00::/8"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("::1/128"),
-]
-
-
-def is_private_url(url: str) -> bool:
-    """Return True if *url* targets a private/loopback/link-local address.
-
-    Mirrors the SSRF denylist used in ``routers/settings.py`` and the Go proxy.
-    Hostnames that are not IP literals are considered public (no DNS lookup);
-    only ``localhost`` is treated as private for hostnames.
-    """
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname
-        if not host:
-            return False
-        host = host.strip().lower()
-        if host == "localhost":
-            return True
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            return False
-        if ip.version == 6 and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped  # type: ignore[assignment]
-        for net in _PRIVATE_NETWORKS:
-            try:
-                if ip in net:
-                    return True
-            except TypeError:
-                continue
-        return False
-    except Exception:
-        return False
 
 
 # Keep original reference for test mock detection (F30)

@@ -291,6 +291,9 @@ def make_router(get_session_dep, get_config) -> APIRouter:
             # Fail-closed audit path: proxy pre-blocked due to classifier/policy failure
             # with empty scores (e.g. classifier:unavailable, video_sampler:no_frames).
             # Only allowlist known fail-closed suffixes to avoid audit pollution.
+            # Proxy emits classifier:{image,video,text}:<label> which is stripped
+            # to classifier:<suffix> before this check; most suffixes are flat
+            # except image/text:unavailable sentinel forms.
             allowed_suffixes = {
                 "porn",
                 "hentai",
@@ -300,7 +303,6 @@ def make_router(get_session_dep, get_config) -> APIRouter:
                 "sampler_error",
                 "sampler_unavailable",
                 "no_frames",
-                "video_sampler:no_frames",
                 "text:unavailable",
                 "image:unavailable",
             }

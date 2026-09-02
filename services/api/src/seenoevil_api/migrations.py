@@ -27,22 +27,33 @@ def upgrade_to_head(database_url: str) -> None:
 
     # File lock to avoid concurrent SQLite WAL DDL races (P2).
     lock_path = os.environ.get("SEENOEVIL_MIGRATE_LOCK", "/tmp/seenoevil_migrate.lock")
+    has_fcntl = True
+    try:
+        import fcntl  # type: ignore[import]  # noqa: F401
+    except ImportError:
+        has_fcntl = False
     for attempt in range(5):
-        try:
-            import fcntl  # type: ignore[import]
-
-            with open(lock_path, "a+") as lf:
-                try:
-                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    command.upgrade(_alembic_config(database_url), "head")
-                    with contextlib.suppress(Exception):
-                        fcntl.flock(lf, fcntl.LOCK_UN)
-                    return
-                except BlockingIOError:
-                    pass
-        except Exception:
-            pass
-        # Fallback: try without lock if fcntl unavailable (e.g. Windows) or busy
+        if has_fcntl:
+            try:
+                with open(lock_path, "a+") as lf:
+                    try:
+                        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        command.upgrade(_alembic_config(database_url), "head")
+                        with contextlib.suppress(Exception):
+                            fcntl.flock(lf, fcntl.LOCK_UN)
+                        return
+                    except BlockingIOError:
+                        # Lock held by another replica — backoff and retry for lock
+                        time.sleep(0.2 * (attempt + 1))
+                        continue
+            except BlockingIOError:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            except Exception:
+                # Unexpected fcntl/open failure — fall through to locked retry
+                pass
+        # Fallback: try without lock if fcntl unavailable (e.g. Windows)
+        # or only after lock attempts exhausted will outer loop retry.
         try:
             command.upgrade(_alembic_config(database_url), "head")
             return
