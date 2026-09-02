@@ -1,8 +1,6 @@
-# see-no-evil — Threat model (M0 skeleton)
+# see-no-evil — Threat model (M2.1)
 
-> This is a **skeleton**. Each section will be expanded in subsequent
-> milestones. The point at M0 is to be honest about what this tool can and
-> cannot do, so users don't develop a false sense of security.
+> Updated through M2.1 (OPA sidecar). Earlier M0 skeleton notes remain in git history.
 
 ## Who is this for?
 

@@ -91,6 +91,8 @@ jobs:
         service:
           - services/image-classifier
           - services/text-classifier
+          - services/scanner
+          - services/updater
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -185,6 +187,21 @@ jobs:
         run: pip install --no-cache-dir 'yamllint==1.35.1'
       - name: yamllint
         run: yamllint -c .yamllint.yml .
+
+  ui-test:
+    name: UI (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        working-directory: services/ui
+        run: npm ci
+      - name: vitest
+        working-directory: services/ui
+        run: npm test
 
   api-tests:
     name: API (pytest)

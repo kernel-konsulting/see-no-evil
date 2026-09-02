@@ -1,8 +1,8 @@
-# see-no-evil — Architecture (M0)
+# see-no-evil — Architecture (M2.1)
 
-This document describes the v3 architecture as of milestone **M0** (scaffolding).
-Nothing here is implemented yet; this is the contract the rest of the work will be
-built against.
+This document describes the v3 architecture as of milestone **M2.1** (OPA sidecar wired).
+All M0-M2.1 milestones are implemented except the deferred items in PLAN.md
+(backup/litestream profiles, vpn-wg). Earlier scaffolding notes have been retained in git history.
 
 ## Components, at a glance
 

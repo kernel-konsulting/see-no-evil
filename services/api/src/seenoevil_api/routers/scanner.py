@@ -25,7 +25,10 @@ def make_router(require_admin) -> APIRouter:
     def trigger_scan() -> dict[str, object]:
         url = os.environ.get(SCANNER_URL_ENV, DEFAULT_SCANNER_URL).rstrip("/")
         try:
-            with httpx.Client(timeout=120.0) as client:
+            # Must exceed scanner's nmap timeout (300s in
+            # services/scanner/src/seenoevil_scanner/scanner.py:207) plus
+            # reporting overhead.
+            with httpx.Client(timeout=310.0) as client:
                 resp = client.post(f"{url}/scan")
         except httpx.HTTPError as exc:
             raise HTTPException(

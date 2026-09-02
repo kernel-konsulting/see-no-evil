@@ -20,5 +20,37 @@ def _alembic_config(database_url: str) -> Config:
 
 
 def upgrade_to_head(database_url: str) -> None:
-    """Run Alembic ``upgrade head`` against ``database_url``."""
+    """Run Alembic ``upgrade head`` with file lock for concurrent replicas."""
+    import contextlib
+    import os
+    import time
+
+    # File lock to avoid concurrent SQLite WAL DDL races (P2).
+    lock_path = os.environ.get("SEENOEVIL_MIGRATE_LOCK", "/tmp/seenoevil_migrate.lock")
+    for attempt in range(5):
+        try:
+            import fcntl  # type: ignore[import]
+
+            with open(lock_path, "a+") as lf:
+                try:
+                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    command.upgrade(_alembic_config(database_url), "head")
+                    with contextlib.suppress(Exception):
+                        fcntl.flock(lf, fcntl.LOCK_UN)
+                    return
+                except BlockingIOError:
+                    pass
+        except Exception:
+            pass
+        # Fallback: try without lock if fcntl unavailable (e.g. Windows) or busy
+        try:
+            command.upgrade(_alembic_config(database_url), "head")
+            return
+        except Exception as exc:
+            # If database is locked, backoff and retry
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
+    # Last attempt without lock
     command.upgrade(_alembic_config(database_url), "head")
