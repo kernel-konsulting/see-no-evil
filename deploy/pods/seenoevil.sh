@@ -27,7 +27,9 @@
 #   ${SNE_HTTPS_PORT:-8448} -> 443   (caddy admin UI, TLS)
 #   ${SNE_PROXY_PORT:-8080} -> 8080  (mitm proxy, http CONNECT)
 #   ${SNE_PROXY_TLS_PORT:-8443} -> 8443
-#   ${SNE_DNS_PORT:-53}     -> 53/udp + 53/tcp   (override for rootless ports)
+#   ${SNE_DNS_PORT:-1053}   -> 53/udp + 53/tcp   (1053 default: rootless-safe;
+#                                                use 53 only as root / with
+#                                                CAP_NET_BIND_SERVICE)
 #
 # Usage
 #   ./seenoevil.sh build         # build all images
@@ -68,7 +70,7 @@ HTTP_PORT="${SNE_HTTP_PORT:-8088}"
 HTTPS_PORT="${SNE_HTTPS_PORT:-8448}"
 PROXY_PORT="${SNE_PROXY_PORT:-8080}"
 PROXY_TLS_PORT="${SNE_PROXY_TLS_PORT:-8443}"
-DNS_PORT="${SNE_DNS_PORT:-53}"
+DNS_PORT="${SNE_DNS_PORT:-1053}"
 HOSTNAME_FQDN="${SNE_HOSTNAME:-seenoevil.lan}"
 TLS_MODE="${SNE_TLS_MODE:-internal}"
 TLS_EMAIL="${SNE_TLS_EMAIL:-}"
@@ -105,6 +107,67 @@ die() { printf '\033[1;31m[seenoevil]\033[0m %s\n' "$*" >&2; exit 1; }
 
 cname() { echo "seenoevil-$1"; }
 
+# ── Preflight ────────────────────────────────────────────────────────────────
+# Fail fast with an actionable message when a required host port is already
+# taken. Without this, `podman pod create` succeeds but the infra container
+# fails to start later with a cryptic
+#   "proxy already running ... internal libpod error"
+# from pasta/gvproxy, and the follow-on `podman run --pod` surfaces only the
+# opaque "unable to start container <id>" line.
+pod_is_running() {
+    podman pod exists "${POD_NAME}" >/dev/null 2>&1 || return 1
+    [[ "$(podman pod inspect -f '{{.State}}' "${POD_NAME}" 2>/dev/null)" == "Running" ]]
+}
+
+# Print the (non-seenoevil) container(s) publishing a given host port, if any.
+port_holders() {
+    local port="$1"
+    podman ps --format '{{.Names}} {{.Ports}}' 2>/dev/null \
+        | grep -E "[:.]${port}->" \
+        | grep -v -E '(^| )seenoevil-[^ ]*' \
+        | grep -v -E '\-infra([ ]|$)' \
+        || true
+}
+
+# 0 = something is listening on 127.0.0.1:<port> (TCP), 1 = free.
+tcp_port_busy() {
+    local port="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import socket,sys; sys.exit(0 if socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "${port}" 2>/dev/null
+        return $?
+    fi
+    # Fallback: bash /dev/tcp probe.
+    if (echo >/dev/tcp/127.0.0.1/"${port}") >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# check_one_port <host-port> <label> <override-var>
+check_one_port() {
+    local port="$1" label="$2" override="$3"
+    local holders=""
+    holders="$(port_holders "${port}")"
+    if [[ -n "${holders}" ]]; then
+        die "host port ${port} (${label}) is already published by another container: ${holders} — stop it or re-run with ${override}=<free-port> (e.g. ${override}=$((port + 10000)) ./seenoevil.sh up)"
+    fi
+    if tcp_port_busy "${port}"; then
+        die "host port ${port} (${label}) is already in use by a host process — stop it or re-run with ${override}=<free-port> (e.g. ${override}=$((port + 10000)) ./seenoevil.sh up)"
+    fi
+}
+
+check_host_ports() {
+    # Our own running pod legitimately holds these ports — nothing to check.
+    if pod_is_running; then
+        return 0
+    fi
+    check_one_port "${HTTP_PORT}"      "caddy HTTP"      "SNE_HTTP_PORT"
+    check_one_port "${HTTPS_PORT}"     "caddy HTTPS"     "SNE_HTTPS_PORT"
+    check_one_port "${PROXY_PORT}"     "mitm proxy"      "SNE_PROXY_PORT"
+    check_one_port "${PROXY_TLS_PORT}" "mitm proxy TLS"  "SNE_PROXY_TLS_PORT"
+    check_one_port "${DNS_PORT}"       "blocky DNS"      "SNE_DNS_PORT"
+}
+
 # ── Volumes / pod ────────────────────────────────────────────────────────────
 ensure_volumes() {
     for v in "${VOL_DATA}" "${VOL_PROXY}" "${VOL_DNS}" "${VOL_CADDY_DATA}" "${VOL_CADDY_CONFIG}" "${VOL_TAILSCALE}"; do
@@ -138,12 +201,15 @@ run_ctr() {
         return 0
     fi
 
-    podman run -d \
+    if ! podman run -d \
         --pod "${POD_NAME}" \
         --name "${name}" \
         --restart unless-stopped \
         "$@" \
-        "${image}" >/dev/null
+        "${image}" >/dev/null; then
+        log "failed to start ${name} — the pod infra may not be running (port conflict?). Run './seenoevil.sh status' and 'podman pod ps', then 'podman logs ${name}' for detail."
+        return 1
+    fi
 }
 
 # ── Build ────────────────────────────────────────────────────────────────────
@@ -163,6 +229,7 @@ cmd_build() {
 
 # ── Up ───────────────────────────────────────────────────────────────────────
 cmd_up() {
+    check_host_ports
     ensure_volumes
     ensure_pod
 
@@ -252,6 +319,13 @@ cmd_up() {
     fi
 
     log "pod up — try 'seenoevil.sh status' or open https://localhost:${HTTPS_PORT}"
+
+    # Surface a half-started pod immediately instead of leaving the user with
+    # a mix of Created/Exited containers from a late port conflict.
+    if ! pod_is_running; then
+        log "pod ${POD_NAME} exists but is not Running — inspect with './seenoevil.sh status' and 'podman ps -a --filter pod=${POD_NAME}'"
+        return 1
+    fi
 }
 
 # ── Down / nuke ──────────────────────────────────────────────────────────────
@@ -259,7 +333,7 @@ cmd_down() {
     if podman pod exists "${POD_NAME}"; then
         log "stopping pod ${POD_NAME}"
         podman pod stop "${POD_NAME}" >/dev/null || true
-        podman pod rm   "${POD_NAME}" >/dev/null || true
+        podman pod rm -f "${POD_NAME}" >/dev/null || true
     fi
 }
 
@@ -328,9 +402,8 @@ Device setup — point a phone or laptop at this pod
 
 1. DNS-only test (easiest — blocks domains, does not classify content):
      - Set the device's DNS server to ${host_ip} on port ${DNS_PORT}.
-       Default is 53 (the standard); rootless Podman on macOS/Linux may
-       need rootful Podman or CAP_NET_BIND_SERVICE to bind it. To use a
-       higher port instead: SNE_DNS_PORT=1053 ./seenoevil.sh up
+        Default is 1053 (rootless-safe); to serve the standard port 53 run
+        as root or with CAP_NET_BIND_SERVICE: SNE_DNS_PORT=53 ./seenoevil.sh up
      - Visit a domain on the blocklist and confirm it fails to resolve.
 
 2. HTTP/HTTPS proxy test (full content classification):
