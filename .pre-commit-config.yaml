@@ -40,7 +40,7 @@ repos:
   # Python — ruff (lint + format)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.4
+    rev: v0.16.5
     hooks:
       - id: ruff
         args: [--fix]
@@ -68,7 +68,7 @@ repos:
   # Go — golangci-lint (comprehensive; run in CI and on manual stage locally)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.13.1
+    rev: v2.13.2
     hooks:
       - id: golangci-lint
         files: ^services/proxy/
@@ -78,16 +78,16 @@ repos:
   # TypeScript / JavaScript — ESLint + Prettier
   # ---------------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.9.0
+    rev: v10.9.1
     hooks:
       - id: eslint
         files: ^services/ui/src/
         types_or: [javascript, jsx, ts, tsx]
         additional_dependencies:
-          - eslint@10.9.0
+          - eslint@10.9.1
           - eslint-config-prettier@10.1.8
-          - "@typescript-eslint/parser@8.67.0"
-          - "@typescript-eslint/eslint-plugin@8.67.0"
+          - "@typescript-eslint/parser@8.68.0"
+          - "@typescript-eslint/eslint-plugin@8.68.0"
         args: [--fix]
 
   - repo: https://github.com/pre-commit/mirrors-prettier
