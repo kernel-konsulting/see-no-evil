@@ -40,7 +40,7 @@ repos:
   # Python — ruff (lint + format)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.2
+    rev: v0.17.3
     hooks:
       - id: ruff
         args: [--fix]
@@ -78,15 +78,15 @@ repos:
   # TypeScript / JavaScript — ESLint + Prettier
   # ---------------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.13.0
+    rev: v10.14.0
     hooks:
       - id: eslint
         files: ^services/ui/src/
         types_or: [javascript, jsx, ts, tsx]
         additional_dependencies:
-          - eslint@10.13.0
+          - eslint@10.14.0
           - eslint-config-prettier@10.1.8
-          - "@typescript-eslint/parser@8.72.0"
+          - "@typescript-eslint/parser@8.72.1"
           - "@typescript-eslint/eslint-plugin@8.72.0"
         args: [--fix]
 
